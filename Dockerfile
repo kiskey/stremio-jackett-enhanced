@@ -25,8 +25,8 @@ ENV TMDB_API_KEY="YOUR_TMDB_API_KEY"
 ENV PREFERRED_RESOLUTIONS="2160p,1080p,720p"
 ENV PREFERRED_LANGUAGES="Tamil,Hindi,Malayalam,Telugu,English,Japanese,Korean,Chinese"
 ENV MAX_RESULTS="50"
-ENV MAX_SIZE="0" # New: Max size in bytes (0 means no restriction). Example: 5368709120 for 5GB
-ENV LOG_LEVEL="info" # Default logging level: debug, info, warn, error, silent
+ENV MAX_SIZE="0"
+ENV LOG_LEVEL="info"
 ENV PUBLIC_TRACKERS_URL="https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt"
 
 # Run the application
