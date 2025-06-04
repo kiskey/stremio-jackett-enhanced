@@ -4,6 +4,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const fetch = require('node-fetch'); // Required for fetching trackers and Jackett API
 const parseTorrent = require('parse-torrent'); // Required for parsing magnet URIs
+const xml2js = require('xml2js'); // Required for parsing XML responses from Jackett
 
 // Load environment variables from .env file
 dotenv.config();
@@ -25,16 +26,23 @@ app.use(express.static('public'));
 const DEFAULT_CONFIG = {
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   jackettApiKey: process.env.JACKETT_API_KEY || 'YOUR_JACKETT_API_KEY',
-  omdbApiKey: process.env.OMDB_API_KEY || 'YOUR_OMDB_API_KEY', // New: OMDB API Key
-  tmdbApiKey: process.env.TMDB_API_KEY || 'YOUR_TMDB_API_KEY', // New: TMDB API Key
+  omdbApiKey: process.env.OMDB_API_KEY || 'YOUR_OMDB_API_KEY',
+  tmdbApiKey: process.env.TMDB_API_KEY || 'YOUR_TMDB_API_KEY',
   preferredResolutions: (process.env.PREFERRED_RESOLUTIONS || '2160p,1080p,720p').split(',').map(item => item.trim()).filter(Boolean),
   preferredLanguages: (process.env.PREFERRED_LANGUAGES || 'Tamil,Hindi,Malayalam,Telugu,English,Japanese,Korean,Chinese').split(',').map(item => item.trim()).filter(Boolean),
   maxResults: parseInt(process.env.MAX_RESULTS || '50', 10),
-  maxSize: parseInt(process.env.MAX_SIZE || '0', 10), // New: Max size in bytes (0 means no restriction)
+  maxSize: parseInt(process.env.MAX_SIZE || '0', 10), // Max size in bytes (0 means no restriction)
   // Logging level: 'debug', 'info', 'warn', 'error', 'silent'
   logLevel: process.env.LOG_LEVEL || 'info', 
   publicTrackersUrl: process.env.PUBLIC_TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt', // Default public trackers URL
 };
+
+// Jackett Category mappings based on user's input
+const JACKETT_CATEGORIES = {
+    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
+    series: '5000,5030,5040,5045,105000,105040,105030,105045'
+};
+
 
 // --- Simple Logging Utility ---
 const LOG_LEVELS = {
@@ -287,16 +295,14 @@ const fetchJackettResults = async (searchParams, config) => {
 
   const jackettApiUrl = new URL(`${config.jackettUrl}/api/v2.0/indexers/all/results/torznab/api`);
   jackettApiUrl.searchParams.append('apikey', config.jackettApiKey);
-  jackettApiUrl.searchParams.append('o', 'json');
+  // Removed 'o=json' as it's causing issues and Jackett defaults to XML for Torznab
   jackettApiUrl.searchParams.append('limit', config.maxResults); // Limit results from Jackett
 
   // Add search parameters dynamically
   if (searchParams.q) jackettApiUrl.searchParams.append('q', searchParams.q);
-  if (searchParams.cat) jackettApiUrl.searchParams.append('cat', searchParams.cat);
+  if (searchParams.cat) jackettApiUrl.searchParams.append('cat', searchParams.cat); // Already comma-separated if multiple
   if (searchParams.imdbid) jackettApiUrl.searchParams.append('imdbid', searchParams.imdbid);
   if (searchParams.tmdbid) jackettApiUrl.searchParams.append('tmdbid', searchParams.tmdbid);
-  // Jackett doesn't directly support 'year' or 'akaTitle' as separate parameters
-  // These are handled by constructing the 'q' parameter in the calling function.
 
   log.debug(`Fetching from Jackett: ${jackettApiUrl.toString()}`);
 
@@ -306,9 +312,42 @@ const fetchJackettResults = async (searchParams, config) => {
       const errorText = await response.text();
       throw new Error(`Jackett API responded with status ${response.status}: ${errorText}`);
     }
-    const data = await response.json();
-    log.debug('Jackett raw response:', JSON.stringify(data, null, 2));
-    return data;
+    const xmlText = await response.text();
+    
+    // Parse XML response
+    const parser = new xml2js.Parser({
+      explicitArray: false, // Ensure single elements don't become arrays
+      mergeAttrs: true // Merge attributes into the element object
+    });
+    const parsedXml = await parser.parseStringPromise(xmlText);
+
+    // Extract results from the parsed XML structure
+    // Jackett Torznab XML typically has items under rss.channel.item
+    const rawResults = parsedXml?.rss?.channel?.item || [];
+
+    // Map XML results to a consistent object structure
+    const mappedResults = rawResults.map(item => {
+        // Extract attributes from 'torznab:attr' array
+        const attrs = item['torznab:attr'] || [];
+        const findAttr = (name) => {
+            const attr = attrs.find(a => a.name === name);
+            return attr ? attr.value : undefined;
+        };
+
+        return {
+            Title: item.title,
+            MagnetUri: item.guid, // In Torznab XML, guid often contains the magnet link
+            PublishDate: item.pubDate,
+            Size: parseInt(findAttr('size') || '0', 10), // Convert size to number
+            Seeders: parseInt(findAttr('seeders') || '0', 10),
+            Leechers: parseInt(findAttr('leechers') || '0', 10), // Jackett might provide leechers directly or as peers-seeders
+            // Include other relevant attributes if present and needed
+            Tracker: item.tracker || item.jackettindexer || 'Unknown' // Get tracker name if available
+        };
+    }).filter(item => item.MagnetUri); // Filter out items without a magnet URI
+
+    return { Results: mappedResults };
+
   } catch (error) {
     log.error('Error fetching from Jackett API:', error.message);
     throw error;
@@ -374,6 +413,88 @@ const createStremioStream = (tor, type, magnetUri) => {
     };
 };
 
+/**
+ * Validates a Jackett result against expected metadata and user preferences.
+ * @param {object} item - The raw Jackett torrent item.
+ * @param {object} metadata - The metadata object (title, year, akaTitles, tmdbId, imdbId) obtained from OMDB/TMDB.
+ * @param {boolean} wasIdQuery - True if the Jackett query was primarily an IMDB/TMDB ID search.
+ * @returns {boolean} True if the item passes validation, false otherwise.
+ */
+const validateJackettResult = (item, metadata, wasIdQuery) => {
+  const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
+  const itemYearMatch = item.Title ? (item.Title.match(/(\d{4})/) ? item.Title.match(/(\d{4})/)[1] : null) : null;
+  
+  // Validation for Title/AKA Title match
+  if (!wasIdQuery) {
+    // If the original query was title-based, we need to match the Jackett title
+    let titleMatch = false;
+
+    // Check main title
+    if (metadata.title) {
+        const primaryTitleLower = metadata.title.toLowerCase();
+        if (itemTitleLower.includes(primaryTitleLower)) {
+            // If year is known, check for year match if present in torrent title
+            if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
+                titleMatch = true;
+            } else if (!metadata.year) { // If year is not known from metadata, a title match is enough
+                titleMatch = true;
+            }
+        }
+    }
+
+    // Check aka titles if main title didn't match or year didn't match
+    if (!titleMatch && metadata.akaTitles && metadata.akaTitles.length > 0) {
+        for (const akaTitle of metadata.akaTitles) {
+            const akaTitleLower = akaTitle.toLowerCase();
+            if (itemTitleLower.includes(akaTitleLower)) {
+                if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
+                    titleMatch = true;
+                    break;
+                } else if (!metadata.year) {
+                    titleMatch = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!titleMatch) {
+      log.debug(`Validation failed: Title mismatch for "${item.Title}". Expected variations of "${metadata.title}" / AKA Titles. (wasIdQuery: ${wasIdQuery})`);
+      return false; // Title did not match expected patterns
+    }
+  } else {
+      // If query was ID-based, we trust Jackett's ID match, but still perform some basic sanity.
+      // E.g., if IMDB/TMDB ID was used, Jackett should return relevant titles.
+      // A very basic check: does the torrent title contain any part of the metadata title or IMDB ID?
+      if (metadata.title && !itemTitleLower.includes(metadata.title.toLowerCase()) && 
+          metadata.imdbId && !itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
+          log.debug(`Validation failed: Basic sanity check for ID query failed for "${item.Title}". Expected "${metadata.title}" or IMDB ID "${metadata.imdbId}". (wasIdQuery: ${wasIdQuery})`);
+          // This check is very loose; more stringent might be needed for real apps.
+          // For now, let's allow it to pass if wasIdQuery is true, as Jackett's ID search is usually accurate.
+          // Re-evaluate if this allows too much junk. For now, trusting Jackett's ID search.
+      }
+      log.debug(`Validation passed for ID query: "${item.Title}". (wasIdQuery: ${wasIdQuery})`);
+  }
+
+  // Validate against user preferences (resolution, language, size)
+  const itemResolution = extractResolution(item.Title) || 'Unknown';
+  const itemLanguage = extractLanguage(item.Title) || 'Unknown';
+  const itemSize = item.Size || 0;
+
+  const passesSize = DEFAULT_CONFIG.maxSize === 0 || itemSize <= DEFAULT_CONFIG.maxSize;
+  const passesResolution = DEFAULT_CONFIG.preferredResolutions.length === 0 ||
+                           DEFAULT_CONFIG.preferredResolutions.includes(itemResolution) ||
+                           itemResolution === 'Unknown';
+  const passesLanguage = DEFAULT_CONFIG.preferredLanguages.length === 0 ||
+                         DEFAULT_CONFIG.preferredLanguages.includes(itemLanguage) ||
+                         itemLanguage === 'Unknown';
+
+  if (!passesSize) log.debug(`Validation failed: Size (${formatBytes(itemSize)}) exceeds max size (${formatBytes(DEFAULT_CONFIG.maxSize)}) for "${item.Title}"`);
+  if (!passesResolution) log.debug(`Validation failed: Resolution (${itemResolution}) not preferred for "${item.Title}"`);
+  if (!passesLanguage) log.debug(`Validation failed: Language (${itemLanguage}) not preferred for "${item.Title}"`);
+
+  return passesSize && passesResolution && passesLanguage;
+};
 
 // --- Stremio Addon Endpoints ---
 
@@ -426,14 +547,18 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   log.info(`Catalog requested: Type=${type}, ID=${id}, Search=${search}, Skip=${skip}`);
 
   let jackettSearchQuery = search;
-  let jackettSearchParams = { cat: type === 'movie' ? '2000' : '5000' };
+  let jackettSearchParams = { cat: JACKETT_CATEGORIES[type] }; // Use new category mapping
+  let metadataForValidation = {};
+  let wasIdQueryForValidation = false; // Flag to indicate if original query was ID based
 
   // If Stremio provides an IMDB ID for the catalog, try to use it for a more precise search
   if (id.startsWith('tt') && !search) { 
     log.debug(`IMDB ID detected for catalog: ${id}. Attempting metadata lookup for initial search query.`);
-    const metadata = await fetchMetadataFromOmdbTmdb(id);
-    if (metadata.title) {
-      jackettSearchQuery = metadata.title; // Use the main title for the catalog search
+    metadataForValidation = await fetchMetadataFromOmdbTmdb(id);
+    metadataForValidation.imdbId = id; // Store IMDB ID in metadata for validation
+    wasIdQueryForValidation = true; // Mark as ID query
+    if (metadataForValidation.title) {
+      jackettSearchQuery = metadataForValidation.title; // Use the main title for the catalog search
       jackettSearchParams.imdbid = id; // Also pass IMDB ID to Jackett if it supports it directly
     } else {
       log.warn(`Could not get title for IMDB ID ${id} for catalog. Falling back to using IMDB ID as query.`);
@@ -442,6 +567,13 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   } else if (id.startsWith('jackett:')) {
      // Custom ID from our catalog, extract original title
      jackettSearchQuery = id.substring('jackett:'.length).split('-').slice(0, -1).join(' ');
+     // For custom Jackett IDs, metadata is not directly available, so assume title-based query
+     metadataForValidation = { title: jackettSearchQuery };
+     wasIdQueryForValidation = false;
+  } else {
+    // If it's a direct search query from Stremio (not an IMDB ID), set metadata for validation
+    metadataForValidation = { title: search };
+    wasIdQueryForValidation = false;
   }
 
   if (!jackettSearchQuery) {
@@ -456,8 +588,13 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
     let processedLinks = [];
     if (jackettResponse && jackettResponse.Results) {
-      // First, sort by PublishDate (latest first)
-      const sortedByDate = jackettResponse.Results.sort((a, b) => {
+      // Filter results for quality and preferences before sorting and slicing
+      const validatedResults = jackettResponse.Results.filter(item => 
+        validateJackettResult(item, metadataForValidation, wasIdQueryForValidation)
+      );
+
+      // Sort by PublishDate (latest first)
+      const sortedByDate = validatedResults.sort((a, b) => {
         const dateA = new Date(a.PublishDate || 0);
         const dateB = new Date(b.PublishDate || 0);
         return dateB.getTime() - dateA.getTime(); // Latest date first
@@ -465,9 +602,9 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
       processedLinks = sortedByDate
         .map(item => {
-          // Ensure MagnetUri exists before processing
+          // Ensure MagnetUri exists before processing (should have been caught by validateJackettResult, but double check)
           if (!item.MagnetUri) {
-              log.warn(`Skipping catalog item due to missing MagnetUri: ${item.Title}`);
+              log.warn(`Skipping catalog item due to missing MagnetUri after validation: ${item.Title}`);
               return null;
           }
           const resolution = extractResolution(item.Title);
@@ -486,21 +623,6 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
           };
         })
         .filter(Boolean) // Remove nulls from map (items with missing MagnetUri)
-        .filter(link => {
-          // Apply size restriction filter
-          const passesSize = DEFAULT_CONFIG.maxSize === 0 || link.originalSize <= DEFAULT_CONFIG.maxSize;
-
-          // Apply resolution filter
-          const passesResolution = DEFAULT_CONFIG.preferredResolutions.length === 0 ||
-                                   DEFAULT_CONFIG.preferredResolutions.includes(link.resolution) ||
-                                   link.resolution === 'Unknown';
-          // Apply language filter
-          const passesLanguage = DEFAULT_CONFIG.preferredLanguages.length === 0 ||
-                                 DEFAULT_CONFIG.preferredLanguages.includes(link.language) ||
-                                 link.language === 'Unknown';
-
-          return passesSize && passesResolution && passesLanguage;
-        })
         .sort((a, b) => {
           // Sort by preferred resolution first (higher preference first)
           const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse(); // Reverse to put preferred resolutions first
@@ -544,13 +666,16 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   let metadata = {};
   let jackettSearchQueries = []; // Array of search parameter objects for Jackett
+  let wasIdQuery = false; // Flag to indicate if the primary search was based on an ID
 
   if (id.startsWith('tt')) { // IMDB ID
     log.debug(`IMDB ID detected: ${id}. Attempting metadata lookup.`);
     metadata = await fetchMetadataFromOmdbTmdb(id);
+    metadata.imdbId = id; // Store IMDB ID in metadata for validation
+    wasIdQuery = true; // Mark as ID query
     
     // Construct search queries based on metadata with fallback strategy
-    const category = type === 'movie' ? '2000' : '5000';
+    const category = JACKETT_CATEGORIES[type];
 
     // 1. Title
     if (metadata.title) {
@@ -584,16 +709,24 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     if (jackettSearchQueries.length === 0) {
         log.warn(`No specific metadata found for IMDB ID ${id}. Falling back to using IMDB ID as query.`);
         jackettSearchQueries.push({ q: id, cat: category });
+        // Even if we query with IMDB ID as 'q', it's still fundamentally an ID-based query
+        // so `wasIdQuery` should remain true.
     }
 
   } else if (id.startsWith('jackett:')) {
     // Custom ID from our catalog, extract original title
     const originalTitle = id.substring('jackett:'.length).split('-').slice(0, -1).join(' ');
-    jackettSearchQueries.push({ q: originalTitle, cat: type === 'movie' ? '2000' : '5000' });
+    jackettSearchQueries.push({ q: originalTitle, cat: JACKETT_CATEGORIES[type] });
+    // For custom Jackett IDs, metadata is not directly available, so assume title-based query
+    metadata = { title: originalTitle };
+    wasIdQuery = false;
   } else {
     // Fallback for other IDs (e.g., if Stremio sends a generic title directly)
     log.warn(`Non-IMDB/Jackett custom ID received: ${id}. Using ID directly as search query.`);
-    jackettSearchQueries.push({ q: id, cat: type === 'movie' ? '2000' : '5000' });
+    jackettSearchQueries.push({ q: id, cat: JACKETT_CATEGORIES[type] });
+    // Assume title-based query for direct ID for now
+    metadata = { title: id };
+    wasIdQuery = false;
   }
 
   let allJackettResults = [];
@@ -616,8 +749,13 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   let streams = [];
   if (allJackettResults.length > 0) {
+    // Filter results for quality and preferences before sorting and slicing
+    const validatedResults = allJackettResults.filter(item => 
+      validateJackettResult(item, metadata, wasIdQuery)
+    );
+
     // First, sort by PublishDate (latest first)
-    const sortedByDate = allJackettResults.sort((a, b) => {
+    const sortedByDate = validatedResults.sort((a, b) => {
       const dateA = new Date(a.PublishDate || 0);
       const dateB = new Date(b.PublishDate || 0);
       return dateB.getTime() - dateA.getTime(); // Latest date first
@@ -627,7 +765,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       .map(item => {
         // Jackett's MagnetUri might sometimes be empty or invalid, filter these out early
         if (!item.MagnetUri) {
-            log.warn(`Skipping stream item due to missing MagnetUri: ${item.Title}`);
+            log.warn(`Skipping stream item due to missing MagnetUri after validation: ${item.Title}`);
             return null;
         }
         // Keep original item for other properties like Seeders, Size
@@ -640,20 +778,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         };
       })
       .filter(Boolean) // Remove nulls from map (items with missing MagnetUri)
-      .filter(link => {
-        // Apply size restriction filter
-        const passesSize = DEFAULT_CONFIG.maxSize === 0 || link.originalSize <= DEFAULT_CONFIG.maxSize;
-
-        // Apply resolution filter
-        const passesResolution = DEFAULT_CONFIG.preferredResolutions.length === 0 ||
-                                 DEFAULT_CONFIG.preferredResolutions.includes(link.resolution) ||
-                                 link.resolution === 'Unknown';
-        // Apply language filter
-        const passesLanguage = DEFAULT_CONFIG.preferredLanguages.length === 0 ||
-                               DEFAULT_CONFIG.preferredLanguages.includes(link.language) ||
-                               link.language === 'Unknown';
-        return passesSize && passesResolution && passesLanguage;
-      })
       .sort((a, b) => {
         // Sort by preferred resolution first (higher preference first)
         const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
@@ -690,5 +814,4 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
 });
-
 
