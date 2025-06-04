@@ -29,8 +29,8 @@ jobs:
         id: docker_build
         uses: docker/build-push-action@v5
         with:
-          context: . # Build context is the current directory (where your Dockerfile is)
-          push: true # Push the image to the registry
+          context: . 
+          push: true 
           tags: |
             ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
             ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
