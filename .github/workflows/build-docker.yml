@@ -1,0 +1,39 @@
+name: Build and Push Docker Image
+
+on:
+  #push:
+  #  branches:
+  #    - main # Trigger on push to the main branch
+  workflow_dispatch: # Allows manual triggering of the workflow from the GitHub UI
+
+env:
+  DOCKER_IMAGE_NAME: stremio-jackett-addon-nodejs # Name of your Docker image
+  DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }} # Docker Hub username stored as a GitHub Secret
+  DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }} # Docker Hub password/PAT stored as a GitHub Secret
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # Action to checkout your repository code
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_PASSWORD }}
+
+      - name: Build and push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v5
+        with:
+          context: . # Build context is the current directory (where your Dockerfile is)
+          push: true # Push the image to the registry
+          tags: |
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }} # Tag with commit SHA for versioning
+
+      - name: Verify image push
+        run: echo "Image ${{ env.DOCKER_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }} pushed successfully!"
