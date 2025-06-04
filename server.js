@@ -414,6 +414,72 @@ const createStremioStream = (tor, type, magnetUri) => {
 };
 
 /**
+ * Calculates a match score for a torrent item based on its title and metadata.
+ * Higher score indicates a better match.
+ * @param {object} item - The raw Jackett torrent item.
+ * @param {object} metadata - The metadata object (title, year, akaTitles) obtained from OMDB/TMDB.
+ * @returns {number} The match score.
+ */
+const calculateMatchScore = (item, metadata) => {
+    let score = 0;
+    const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
+    // Use word boundary for year to avoid matching "1999" in "A.1999.Film" as a year if it's not
+    const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
+
+    const primaryTitleLower = metadata.title ? metadata.title.toLowerCase() : '';
+    const akaTitlesLower = (metadata.akaTitles || []).map(t => t.toLowerCase());
+
+    // Score based on title and year match
+    // Strongest match: Primary Title + Year
+    if (primaryTitleLower && itemTitleLower.includes(primaryTitleLower) && metadata.year && itemYearMatch === metadata.year) {
+        score += 100;
+    } 
+    // Next: Primary Title only (if year doesn't match or not available)
+    else if (primaryTitleLower && itemTitleLower.includes(primaryTitleLower)) {
+        score += 10;
+    }
+
+    // Iterate through aka titles for scoring
+    for (const akaTitle of akaTitlesLower) {
+        // Strongest aka match: AKA Title + Year
+        if (akaTitle && itemTitleLower.includes(akaTitle) && metadata.year && itemYearMatch === metadata.year) {
+            score += 50; // Bonus for aka title + year match
+        } 
+        // Next: AKA Title only (if year doesn't match or not available)
+        else if (akaTitle && itemTitleLower.includes(akaTitle)) {
+            score += 5; // Base score for aka title match
+        }
+    }
+    
+    // Penalize if the torrent title contains an obvious different year when metadata year is known
+    // This check should only apply if there was some title match already, to avoid penalizing irrelevant torrents.
+    if (metadata.year && itemYearMatch && itemYearMatch !== metadata.year) {
+        // Only penalize if it seemed like it was trying to match the title
+        if (itemTitleLower.includes(primaryTitleLower) || akaTitlesLower.some(t => itemTitleLower.includes(t))) {
+             score -= 20; // Penalize for wrong year
+        }
+    }
+
+    // Boost for exact title match (whole word) if available - can be a strong indicator
+    // This looks for an exact word match of the primary title in the torrent title
+    if (primaryTitleLower && itemTitleLower.split(/\W+/).includes(primaryTitleLower.split(/\W+/).join(''))) { // check for whole word match
+        score += 2;
+    }
+
+    // Boost if item title contains IMDB/TMDB ID (especially for ID-based queries)
+    if (metadata.imdbId && itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
+        score += 1;
+    }
+    if (metadata.tmdbId && itemTitleLower.includes(metadata.tmdbId.toString())) {
+        score += 0.5;
+    }
+
+
+    // Ensure score doesn't go negative, though it should ideally be positive for valid items.
+    return Math.max(0, score);
+};
+
+/**
  * Validates a Jackett result against expected metadata and user preferences.
  * @param {object} item - The raw Jackett torrent item.
  * @param {object} metadata - The metadata object (title, year, akaTitles, tmdbId, imdbId) obtained from OMDB/TMDB.
@@ -422,59 +488,81 @@ const createStremioStream = (tor, type, magnetUri) => {
  */
 const validateJackettResult = (item, metadata, wasIdQuery) => {
   const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
-  const itemYearMatch = item.Title ? (item.Title.match(/(\d{4})/) ? item.Title.match(/(\d{4})/)[1] : null) : null;
-  
-  // Validation for Title/AKA Title match
-  if (!wasIdQuery) {
-    // If the original query was title-based, we need to match the Jackett title
-    let titleMatch = false;
+  const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null; // Use word boundary for year
 
-    // Check main title
-    if (metadata.title) {
-        const primaryTitleLower = metadata.title.toLowerCase();
-        if (itemTitleLower.includes(primaryTitleLower)) {
-            // If year is known, check for year match if present in torrent title
-            if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
-                titleMatch = true;
-            } else if (!metadata.year) { // If year is not known from metadata, a title match is enough
-                titleMatch = true;
-            }
-        }
+  // 1. Basic check: Ensure MagnetUri exists.
+  if (!item.MagnetUri) {
+    log.debug(`Validation failed: Missing MagnetUri for "${item.Title}"`);
+    return false;
+  }
+
+  // 2. Title/AKA Title/Year Match (Crucial for relevance)
+  let passesTitleMatch = false;
+  let debugReason = '';
+
+  const primaryTitleLower = metadata.title ? metadata.title.toLowerCase() : '';
+  const akaTitlesLower = (metadata.akaTitles || []).map(t => t.toLowerCase());
+
+  if (wasIdQuery) {
+    // If original query was by ID (IMDB/TMDB), we expect a strong connection.
+    // It must match title (primary or aka) AND year (if present) OR contain the IMDB ID directly.
+    const titleMatchesPrimaryOrAka = [primaryTitleLower, ...akaTitlesLower].some(t => t && itemTitleLower.includes(t));
+    const yearMatches = (metadata.year && itemYearMatch) ? (itemYearMatch === metadata.year) : true; // If no year info, it passes
+
+    if (titleMatchesPrimaryOrAka && yearMatches) {
+        passesTitleMatch = true;
+        debugReason = "ID Query: Title/AKA/Year Match";
+    } else if (metadata.imdbId && itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
+        // As a last resort for ID queries, if title/year doesn't match but IMDB ID is in torrent title.
+        passesTitleMatch = true;
+        debugReason = "ID Query: Fallback IMDB ID in torrent title";
     }
 
-    // Check aka titles if main title didn't match or year didn't match
-    if (!titleMatch && metadata.akaTitles && metadata.akaTitles.length > 0) {
-        for (const akaTitle of metadata.akaTitles) {
-            const akaTitleLower = akaTitle.toLowerCase();
-            if (itemTitleLower.includes(akaTitleLower)) {
+    if (!passesTitleMatch) {
+        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected "${primaryTitleLower}" (${metadata.year}) or aka titles or IMDB ID "${metadata.imdbId}".`);
+        return false; // **CRITICAL FIX: Return false if ID query validation fails.**
+    } else {
+        log.debug(`Validation passed: ID-based query match for "${item.Title}". (Reason: ${debugReason})`);
+    }
+
+  } else { // Original query was title-based (e.g., from search box or catalog click)
+    
+    // Prioritize exact or strong title + year match
+    if (metadata.title && metadata.year && itemTitleLower.includes(primaryTitleLower) && itemYearMatch === metadata.year) {
+        passesTitleMatch = true;
+        debugReason = "Exact Title+Year Match";
+    } else if (metadata.akaTitles && metadata.akaTitles.length > 0) {
+        for (const akaTitle of akaTitlesLower) {
+            if (itemTitleLower.includes(akaTitle)) {
                 if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
-                    titleMatch = true;
+                    passesTitleMatch = true;
+                    debugReason = "AKA Title+Year Match";
                     break;
-                } else if (!metadata.year) {
-                    titleMatch = true;
+                } else if (!metadata.year) { // AKA title matches, and no year info from metadata
+                    passesTitleMatch = true;
+                    debugReason = "AKA Title Match, no year metadata";
                     break;
                 }
             }
         }
     }
-
-    if (!titleMatch) {
-      log.debug(`Validation failed: Title mismatch for "${item.Title}". Expected variations of "${metadata.title}" / AKA Titles. (wasIdQuery: ${wasIdQuery})`);
-      return false; // Title did not match expected patterns
+    
+    // Fallback to just primary title match if no strong match found (only if metadata title is available)
+    if (!passesTitleMatch && metadata.title && itemTitleLower.includes(primaryTitleLower)) {
+        passesTitleMatch = true;
+        debugReason = "Basic Title Match";
     }
-  } else {
-      // If query was ID-based, we trust Jackett's ID match, but still perform some basic sanity.
-      // E.g., if IMDB/TMDB ID was used, Jackett should return relevant titles.
-      // A very basic check: does the torrent title contain any part of the metadata title or IMDB ID?
-      if (metadata.title && !itemTitleLower.includes(metadata.title.toLowerCase()) && 
-          metadata.imdbId && !itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
-          log.debug(`Validation failed: Basic sanity check for ID query failed for "${item.Title}". Expected "${metadata.title}" or IMDB ID "${metadata.imdbId}". (wasIdQuery: ${wasIdQuery})`);
-          // This check is very loose; more stringent might be needed for real apps.
-          // For now, let's allow it to pass if wasIdQuery is true, as Jackett's ID search is usually accurate.
-          // Re-evaluate if this allows too much junk. For now, trusting Jackett's ID search.
-      }
-      log.debug(`Validation passed for ID query: "${item.Title}". (wasIdQuery: ${wasIdQuery})`);
+    
+    if (!passesTitleMatch) {
+        log.debug(`Validation failed: Title-based query, no sufficient title/year match for "${item.Title}". Expected variations of "${metadata.title}" (${metadata.year}) / AKA Titles. (Reason: ${debugReason})`);
+        return false;
+    } else {
+        log.debug(`Validation passed: Title-based query match for "${item.Title}". (Reason: ${debugReason})`);
+    }
   }
+
+  // At this point, title match has passed (either wasIdQuery logic or !wasIdQuery logic).
+  // Now apply user preferences filters.
 
   // Validate against user preferences (resolution, language, size)
   const itemResolution = extractResolution(item.Title) || 'Unknown';
@@ -493,7 +581,7 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
   if (!passesResolution) log.debug(`Validation failed: Resolution (${itemResolution}) not preferred for "${item.Title}"`);
   if (!passesLanguage) log.debug(`Validation failed: Language (${itemLanguage}) not preferred for "${item.Title}"`);
 
-  return passesSize && passesResolution && passesLanguage;
+  return passesSize && passesResolution && passesLanguage; // All preference filters must pass
 };
 
 // --- Stremio Addon Endpoints ---
@@ -593,50 +681,71 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
         validateJackettResult(item, metadataForValidation, wasIdQueryForValidation)
       );
 
-      // Sort by PublishDate (latest first)
-      const sortedByDate = validatedResults.sort((a, b) => {
-        const dateA = new Date(a.PublishDate || 0);
-        const dateB = new Date(b.PublishDate || 0);
-        return dateB.getTime() - dateA.getTime(); // Latest date first
-      });
-
-      processedLinks = sortedByDate
-        .map(item => {
-          // Ensure MagnetUri exists before processing (should have been caught by validateJackettResult, but double check)
-          if (!item.MagnetUri) {
-              log.warn(`Skipping catalog item due to missing MagnetUri after validation: ${item.Title}`);
-              return null;
-          }
-          const resolution = extractResolution(item.Title);
-          const language = extractLanguage(item.Title);
+      // Calculate match score for each validated item in catalog
+      const resultsWithScore = validatedResults.map(item => {
+          // Simplified score for catalog, based on how well it matches the initial search query
+          let catalogScore = 0;
+          const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
+          const searchQLower = jackettSearchQuery ? jackettSearchQuery.toLowerCase() : '';
           
-          return {
-            id: `jackett:${item.Title.replace(/\s+/g, '-')}-${item.Seeders}`, // Unique ID for the item
-            type: type,
-            name: item.Title,
-            poster: `https://placehold.co/200x300/007bff/ffffff?text=${encodeURIComponent(item.Title.substring(0,10))}`, // Placeholder poster
-            description: `Size: ${formatBytes(item.Size || 0)} | Seeders: ${item.Seeders || 0} | Leechers: ${item.Leechers || 0} | Resolution: ${resolution || 'Unknown'} | Language: ${language || 'Unknown'}`,
-            originalSeeders: item.Seeders || 0, // Keep original seeders for sorting
-            originalSize: item.Size || 0, // Keep original size for filtering
-            resolution: resolution, // Add resolution and language for filtering
-            language: language,
-          };
-        })
-        .filter(Boolean) // Remove nulls from map (items with missing MagnetUri)
-        .sort((a, b) => {
-          // Sort by preferred resolution first (higher preference first)
-          const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse(); // Reverse to put preferred resolutions first
-          const aResIndex = resOrder.indexOf(a.resolution);
-          const bResIndex = resOrder.indexOf(b.resolution);
-          if (aResIndex !== bResIndex) {
-            return aResIndex - bResIndex; // Lower index (higher preference) comes first
+          if (searchQLower && itemTitleLower.includes(searchQLower)) {
+              catalogScore += 10;
+              // Additional check for year if available in search query or metadataForValidation
+              const searchYearMatch = jackettSearchQuery.match(/\b(\d{4})\b/) ? jackettSearchQuery.match(/\b(\d{4})\b/)[1] : null;
+              const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
+              if (searchYearMatch && itemYearMatch && searchYearMatch === itemYearMatch) {
+                  catalogScore += 5;
+              } else if (metadataForValidation.year && itemYearMatch && metadataForValidation.year === itemYearMatch) {
+                   catalogScore += 3;
+              }
+          }
+          // If the query was an IMDB ID, and the torrent title includes it, give a small boost
+          if (metadataForValidation.imdbId && itemTitleLower.includes(metadataForValidation.imdbId.toLowerCase())) {
+              catalogScore += 2;
           }
 
-          // Then by seeders (more seeders first)
-          return b.originalSeeders - a.originalSeeders;
-        })
-        .slice(0, DEFAULT_CONFIG.maxResults); // Limit results
+          const resolution = extractResolution(item.Title) || 'Unknown';
+          const language = extractLanguage(item.Title) || 'Unknown';
 
+          return {
+              item, 
+              id: `jackett:${item.Title.replace(/\s+/g, '-')}-${item.Seeders}`,
+              type: type,
+              name: item.Title,
+              poster: `https://placehold.co/200x300/007bff/ffffff?text=${encodeURIComponent(item.Title.substring(0,10))}`,
+              description: `Size: ${formatBytes(item.Size || 0)} | Seeders: ${item.Seeders || 0} | Leechers: ${item.Leechers || 0} | Resolution: ${resolution || 'Unknown'} | Language: ${language || 'Unknown'}`,
+              originalSeeders: item.Seeders || 0,
+              originalSize: item.Size || 0,
+              resolution: resolution,
+              language: language,
+              score: catalogScore, // Add score to catalog item
+          };
+      }).filter(Boolean); // Ensure no nulls are passed due to missing MagnetUri
+
+      // Sort results based on new scoring for catalog
+      processedLinks = resultsWithScore.sort((a, b) => {
+        // 1. Sort by Match Score (highest first)
+        if (b.score !== a.score) {
+            return b.score - a.score;
+        }
+        // 2. Then by PublishDate (latest first)
+        const dateA = new Date(a.item.PublishDate || 0);
+        const dateB = new Date(b.item.PublishDate || 0);
+        if (dateB.getTime() !== dateA.getTime()) {
+          return dateB.getTime() - dateA.getTime();
+        }
+        // 3. Then by preferred resolution (higher preference first)
+        const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
+        const aResIndex = resOrder.indexOf(a.resolution);
+        const bResIndex = resOrder.indexOf(b.resolution);
+        if (aResIndex !== bResIndex) {
+          return aResIndex - bResIndex;
+        }
+        // 4. Finally by seeders (more seeders first)
+        return b.originalSeeders - a.originalSeeders;
+      })
+      .slice(0, DEFAULT_CONFIG.maxResults); // Limit results after full sorting and filtering
+      
       // Implement pagination based on 'skip'
       const start = parseInt(skip || '0', 10);
       const end = start + 100; // Stremio requests 100 items per page
@@ -749,49 +858,50 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   let streams = [];
   if (allJackettResults.length > 0) {
-    // Filter results for quality and preferences before sorting and slicing
+    // Filter results for quality and preferences
     const validatedResults = allJackettResults.filter(item => 
       validateJackettResult(item, metadata, wasIdQuery)
     );
 
-    // First, sort by PublishDate (latest first)
-    const sortedByDate = validatedResults.sort((a, b) => {
-      const dateA = new Date(a.PublishDate || 0);
-      const dateB = new Date(b.PublishDate || 0);
-      return dateB.getTime() - dateA.getTime(); // Latest date first
-    });
+    // Calculate match score for each validated item
+    const resultsWithScore = validatedResults.map(item => ({
+        item,
+        score: calculateMatchScore(item, metadata), // Calculate score here
+        resolution: extractResolution(item.Title) || 'Unknown',
+        language: extractLanguage(item.Title) || 'Unknown',
+        originalSeeders: item.Seeders || 0,
+        originalSize: item.Size || 0,
+    }));
 
-    const processedLinks = sortedByDate
-      .map(item => {
-        // Jackett's MagnetUri might sometimes be empty or invalid, filter these out early
-        if (!item.MagnetUri) {
-            log.warn(`Skipping stream item due to missing MagnetUri after validation: ${item.Title}`);
-            return null;
-        }
-        // Keep original item for other properties like Seeders, Size
-        return {
-          item, 
-          resolution: extractResolution(item.Title) || 'Unknown',
-          language: extractLanguage(item.Title) || 'Unknown',
-          originalSeeders: item.Seeders || 0,
-          originalSize: item.Size || 0, // Keep original size for filtering
-        };
-      })
-      .filter(Boolean) // Remove nulls from map (items with missing MagnetUri)
-      .sort((a, b) => {
-        // Sort by preferred resolution first (higher preference first)
-        const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
-        const aResIndex = resOrder.indexOf(a.resolution);
-        const bResIndex = resOrder.indexOf(b.resolution);
-        if (aResIndex !== bResIndex) {
-          return aResIndex - bResIndex;
-        }
-        // Then by seeders (more seeders first)
-        return b.originalSeeders - a.originalSeeders;
-      })
-      .slice(0, DEFAULT_CONFIG.maxResults); // Limit results
+    // Sort by:
+    // 1. Match Score (highest first)
+    // 2. PublishDate (latest first)
+    // 3. Preferred Resolution (highest preference first)
+    // 4. Seeders (more seeders first)
+    const sortedAndScoredResults = resultsWithScore.sort((a, b) => {
+      // 1. Sort by Match Score
+      if (b.score !== a.score) {
+          return b.score - a.score;
+      }
+      // 2. Then by PublishDate (latest first)
+      const dateA = new Date(a.item.PublishDate || 0);
+      const dateB = new Date(b.item.PublishDate || 0);
+      if (dateB.getTime() !== dateA.getTime()) {
+        return dateB.getTime() - dateA.getTime();
+      }
+      // 3. Then by preferred resolution (higher preference first)
+      const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
+      const aResIndex = resOrder.indexOf(a.resolution);
+      const bResIndex = resOrder.indexOf(b.resolution);
+      if (aResIndex !== bResIndex) {
+        return aResIndex - bResIndex;
+      }
+      // 4. Finally by seeders (more seeders first)
+      return b.originalSeeders - a.originalSeeders;
+    })
+    .slice(0, DEFAULT_CONFIG.maxResults); // Limit results after full sorting
 
-    for (const link of processedLinks) {
+    for (const link of sortedAndScoredResults) {
         // Use the createStremioStream utility to format the stream object
         const stremioStream = createStremioStream(link.item, type, link.item.MagnetUri);
         if (stremioStream) {
@@ -814,4 +924,3 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
 });
-
