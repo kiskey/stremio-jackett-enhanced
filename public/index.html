@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stremio Jackett Addon Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center p-6">
+    <div class="max-w-3xl w-full bg-gray-800 p-8 rounded-xl shadow-lg">
+        <h1 class="text-4xl font-bold text-blue-400 mb-6 text-center">Stremio Jackett Addon Configuration</h1>
+        <p class="text-gray-300 mb-6 text-center">
+            This page displays the current configuration of your Stremio Jackett Addon.
+            To change these settings, you need to set the corresponding environment variables
+            when running the Docker container or deploying the application.
+        </p>
+
+        <h2 class="text-2xl font-semibold text-white mb-4">Current Configuration:</h2>
+        <div id="config-display" class="bg-gray-700 p-4 rounded-lg mb-6 text-sm sm:text-base">
+            <p>Loading configuration...</p>
+        </div>
+
+        <h2 class="text-2xl font-semibold text-white mb-4">How to Configure:</h2>
+        <p class="text-gray-300 mb-4">
+            The addon reads its configuration from environment variables.
+            Below are the variables you can set:
+        </p>
+        <ul class="list-disc list-inside text-gray-300 space-y-2 mb-6">
+            <li><code>JACKETT_URL</code>: Your Jackett instance URL (e.g., <code>http://localhost:9117</code>)</li>
+            <li><code>JACKETT_API_KEY</code>: Your Jackett API Key</li>
+            <li><code>OMDB_API_KEY</code>: Your OMDb API Key (for movie/series metadata lookup)</li>
+            <li><code>TMDB_API_KEY</code>: Your TMDB API Key (for movie/series metadata lookup, including alternative titles)</li>
+            <li><code>PREFERRED_RESOLUTIONS</code>: Comma-separated list of resolutions (e.g., <code>2160p,1080p,720p</code>). Order matters for sorting preference.</li>
+            <li><code>PREFERRED_LANGUAGES</code>: Comma-separated list of languages (e.g., <code>English,Hindi,Tamil</code>). Order matters for sorting preference.</li>
+            <li><code>MAX_RESULTS</code>: Maximum number of results to return (e.g., <code>50</code>)</li>
+            <li><code>MAX_SIZE</code>: Maximum torrent size in bytes (e.g., <code>5368709120</code> for 5GB). Set to <code>0</code> for no restriction.</li>
+            <li><code>LOG_LEVEL</code>: Set the logging verbosity (<code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>, <code>silent</code>).</li>
+            <li><code>PUBLIC_TRACKERS_URL</code>: URL to a plain text file containing public tracker URLs (one per line). Default is a popular public list.</li>
+        </ul>
+
+        <h3 class="text-xl font-semibold text-white mt-6 mb-3">Example Docker Run Command:</h3>
+        <pre class="bg-gray-700 p-4 rounded-lg text-green-300 text-sm overflow-x-auto whitespace-pre-wrap break-words">
+            <code>
+docker run -p 7000:7000 \
+  -e JACKETT_URL="http://your-jackett-instance:9117" \
+  -e JACKETT_API_KEY="YOUR_API_KEY_HERE" \
+  -e OMDB_API_KEY="YOUR_OMDB_API_KEY_HERE" \
+  -e TMDB_API_KEY="YOUR_TMDB_API_KEY_HERE" \
+  -e PREFERRED_RESOLUTIONS="2160p,1080p" \
+  -e PREFERRED_LANGUAGES="English,Tamil" \
+  -e MAX_RESULTS="75" \
+  -e MAX_SIZE="5368709120" \
+  -e LOG_LEVEL="debug" \
+  -e PUBLIC_TRACKERS_URL="https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" \
+  stremio-jackett-addon-nodejs
+            </code>
+        </pre>
+
+        <h3 class="text-xl font-semibold text-white mt-6 mb-3">Addon Manifest URL:</h3>
+        <p class="text-gray-300">
+            Add this URL to Stremio: <code id="manifest-url" class="text-blue-400"></code>
+        </p>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            const configDisplay = document.getElementById('config-display');
+            const manifestUrlElement = document.getElementById('manifest-url');
+
+            try {
+                // Fetch configuration from the /config API endpoint
+                const response = await fetch('/config');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const config = await response.json();
+
+                let configHtml = '';
+                for (const key in config) {
+                    let value = config[key];
+                    if (Array.isArray(value)) {
+                        value = value.join(', ');
+                    } else if (key === 'maxSize' && value !== 0) {
+                        // Convert bytes to human-readable format for display
+                        const formatBytes = (bytes) => {
+                            if (bytes === 0) return '0 Bytes';
+                            const k = 1024;
+                            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+                            const i = Math.floor(Math.log(bytes) / Math.log(k));
+                            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                        };
+                        value = formatBytes(value);
+                    }
+                    configHtml += `<p><strong>${key}:</strong> ${value}</p>`;
+                }
+                configDisplay.innerHTML = configHtml;
+
+                // Display the manifest URL dynamically
+                const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+                manifestUrlElement.textContent = `${window.location.protocol}//${window.location.hostname}:${port}/manifest.json`;
+
+            } catch (error) {
+                console.error('Failed to load configuration:', error);
+                configDisplay.innerHTML = '<p class="text-red-400">Error loading configuration. Check server logs.</p>';
+            }
+        });
+    </script>
+</body>
+</html>
