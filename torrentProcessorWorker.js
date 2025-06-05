@@ -252,81 +252,85 @@ parentPort.on('message', (message) => {
         const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
 
         for (const result of jackettResults) {
-            // --- Early Filtering of low-quality types ---
-            const lowerTitle = result.Title ? result.Title.toLowerCase() : ''; // Ensure Title is a string
-            if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
-                continue; // Skip TS/Telecine
-            }
+            try { // Individual try-catch for each result to prevent worker crash
+                // --- Early Filtering of low-quality types ---
+                const lowerTitle = result.Title ? result.Title.toLowerCase() : ''; // Ensure Title is a string
+                if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
+                    continue; // Skip TS/Telecine
+                }
 
-            // --- Basic InfoHash/MagnetUri Validation ---
-            // Ensure result.MagnetUri is a string before matching
-            if (!result.InfoHash && (!result.MagnetUri || typeof result.MagnetUri !== 'string')) continue;
+                // --- Basic InfoHash/MagnetUri Validation ---
+                if (!result.InfoHash && (!result.MagnetUri || typeof result.MagnetUri !== 'string')) continue;
 
-            let infoHash = result.InfoHash || (typeof result.MagnetUri === 'string' ? result.MagnetUri.match(/btih:([^&/]+)/)?.[1] : null);
-            if (!infoHash) continue;
-            infoHash = infoHash.toLowerCase();
+                let infoHash = result.InfoHash || (typeof result.MagnetUri === 'string' ? result.MagnetUri.match(/btih:([^&/]+)/)?.[1] : null);
+                if (!infoHash) continue;
+                infoHash = infoHash.toLowerCase();
 
-            if (processedInfoHashes.has(infoHash)) continue;
+                if (processedInfoHashes.has(infoHash)) continue;
 
-            // --- Validate Torrent Title vs. Expected Metadata ---
-            if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue; // Ensure Title is a string
+                // --- Validate Torrent Title vs. Expected Metadata ---
+                if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue; // Ensure Title is a string
 
-            // --- Parse Torrent Details (Resolution, Quality, Language) ---
-            const parsedDetails = parseTorrentDetails(result.Title || ''); // Ensure Title is a string
+                // --- Parse Torrent Details (Resolution, Quality, Language) ---
+                const parsedDetails = parseTorrentDetails(result.Title || ''); // Ensure Title is a string
 
-            // --- Filter out resolutions less than 720p (early) ---
-            if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
-                continue; // Skip resolutions below 720p
-            }
+                // --- Filter out resolutions less than 720p (early) ---
+                if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
+                    continue; // Skip resolutions below 720p
+                }
 
-            // --- Existing Filters (Seeders, Size, Language Preference) ---
-            // Ensure result.Seeders is a number
-            const currentSeeders = typeof result.Seeders === 'number' ? result.Seeders : 0;
-            if (currentSeeders < MINIMUM_SEEDERS) {
-                continue;
-            }
-
-            // Ensure result.Size is a number
-            const currentSize = typeof result.Size === 'number' ? result.Size : 0;
-            const torrentSizeMB = currentSize / (1024 * 1024);
-            if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
-                continue;
-            }
-
-            const detectedLanguage = parsedDetails.language;
-            if (PREFERRED_LANGUAGES.length > 0) {
-                if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
+                // --- Existing Filters (Seeders, Size, Language Preference) ---
+                const currentSeeders = typeof result.Seeders === 'number' ? result.Seeders : 0;
+                if (currentSeeders < MINIMUM_SEEDERS) {
                     continue;
                 }
+
+                const currentSize = typeof result.Size === 'number' ? result.Size : 0;
+                const torrentSizeMB = currentSize / (1024 * 1024);
+                if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
+                    continue;
+                }
+
+                const detectedLanguage = parsedDetails.language;
+                if (PREFERRED_LANGUAGES.length > 0) {
+                    if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
+                        continue;
+                    }
+                }
+
+                // Do NOT skip based on PublishedDate here.
+                // We will pass it along and let the main thread's sorting handle invalid/missing dates by pushing them to the bottom.
+                // Log a warning if it's invalid, but don't filter out the torrent.
+                if (!result.PublishedDate || isNaN(new Date(result.PublishedDate).getTime())) {
+                    console.warn(`[WORKER] Invalid or missing PublishedDate for "${result.Title}". Will be sorted to lower priority.`);
+                }
+
+                const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
+
+                processedInfoHashes.add(infoHash);
+
+                processedStreams.push({
+                    originalResult: result,
+                    magnetLink: magnetLink,
+                    infoHash: infoHash,
+                    parsedDetails: parsedDetails, // Reuse parsed details
+                    resolutionRank: getResolutionRank(parsedDetails.resolution),
+                    videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
+                    audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
+                    hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && detectedLanguage && PREFERRED_LANGUAGES.includes(detectedLanguage),
+                });
+            } catch (innerErr) {
+                // Catch errors for an individual torrent result to prevent the entire worker from crashing
+                console.error(`[ERROR][WORKER] Error processing individual torrent "${result.Title || 'Unknown Title'}": ${innerErr.message}`);
+                console.error(innerErr.stack);
             }
-
-            // Ensure result.PublishedDate is a valid date string
-            if (!result.PublishedDate || isNaN(new Date(result.PublishedDate).getTime())) {
-                console.warn(`[WORKER] Skipping result due to invalid PublishedDate: "${result.Title}" - "${result.PublishedDate}"`);
-                continue; // Skip if PublishedDate is invalid
-            }
-
-            const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
-
-            processedInfoHashes.add(infoHash);
-
-            processedStreams.push({
-                originalResult: result,
-                magnetLink: magnetLink,
-                infoHash: infoHash,
-                parsedDetails: parsedDetails, // Reuse parsed details
-                resolutionRank: getResolutionRank(parsedDetails.resolution),
-                videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
-                audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
-                hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && detectedLanguage && PREFERRED_LANGUAGES.includes(detectedLanguage),
-            });
         }
 
         const workerEndTime = performance.now();
         console.log(`[INFO][WORKER] Processing ${jackettResults.length} raw results to ${processedStreams.length} filtered results in: ${((workerEndTime - workerStartTime) / 1000).toFixed(2)} seconds.`);
         parentPort.postMessage(processedStreams);
     } catch (err) {
-        // Log the error and send it back to the main thread for complete visibility
+        // Catch any broader errors outside the individual torrent loop that could crash the worker
         console.error(`[ERROR][WORKER] Unhandled error during torrent processing: ${err.message}`);
         console.error(err.stack);
         parentPort.postMessage({ error: err.message, stack: err.stack });
