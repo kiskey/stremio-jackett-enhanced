@@ -10,10 +10,10 @@
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
+    "express": "^4.1.2",
     "node-fetch": "^2.6.1",
     "parse-torrent": "^9.1.5",
-    "xml2js": "^0.6.2" 
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.0"
