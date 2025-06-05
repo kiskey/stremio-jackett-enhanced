@@ -504,8 +504,8 @@ fetchAndCacheTrackers().then(() => {
     console.log('[INFO] [SERVER STARTUP] Public tracker pre-fetch complete.');
 });
 
-// Set up the HTTP server for the addon using the correct function call
-serveHTTP(builder.getInterface()); // Corrected: serveHTTP is a function, not a builder method
+// Set up the HTTP server for the addon using the correct function call and explicitly setting the port
+serveHTTP(builder.getInterface(), { port: 7000 }); // Corrected: Pass { port: 7000 } option
 
 console.log('[INFO] Logging Level: info');
 console.log(`[INFO] Response Timeout: ${RESPONSE_TIMEOUT_MS}ms`);
