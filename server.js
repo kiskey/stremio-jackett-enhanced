@@ -315,8 +315,8 @@ const fetchJackettResults = async (searchParams, config) => {
 
   const jackettApiUrl = new URL(`${config.jackettUrl}/api/v2.0/indexers/all/results/torznab/api`);
   jackettApiUrl.searchParams.append('apikey', config.jackettApiKey);
-  // Removed 'o=json' as it's causing issues and Jackett defaults to XML for Torznab
-  jackettApiUrl.searchParams.append('limit', config.maxResults); // Limit results from Jackett
+  // Set the limit to 100 to get enough raw results for post-filtering, or use maxResults if it's higher
+  jackettApiUrl.searchParams.append('limit', Math.max(config.maxResults, 100)); 
 
   // Add search parameters dynamically
   if (searchParams.q) jackettApiUrl.searchParams.append('q', searchParams.q);
@@ -392,7 +392,12 @@ const createStremioStream = (tor, type, magnetUri) => {
         return null; // Return null if magnet URI is invalid
     }
 
-    const infoHash = parsedTorrent.infoHash.toLowerCase();
+    // IMPORTANT: Ensure infoHash is available and valid before proceeding
+    const infoHash = parsedTorrent.infoHash ? parsedTorrent.infoHash.toLowerCase() : null;
+    if (!infoHash) {
+        log.warn(`Skipping stream for "${tor.Title}" due to missing/invalid infoHash after magnet URI parsing.`);
+        return null;
+    }
 
     // Use Jackett's Title as the base for the stream's display title
     let title = tor.Title; 
@@ -741,7 +746,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
         // 4. Finally by seeders (more seeders first)
         return b.originalSeeders - a.originalSeeders;
       })
-      .slice(0, DEFAULT_CONFIG.maxResults); // Limit results after full sorting and filtering
+      .slice(0, DEFAULT_CONFIG.maxResults); // Apply maxResults after full sorting and filtering
       
       // Implement pagination based on 'skip'
       const start = parseInt(skip || '0', 10);
@@ -873,7 +878,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     // Sort by:
     // 1. Match Score (highest first)
     // 2. PublishDate (latest first)
-    // 3. Preferred Resolution (highest preference first)
+    // 3. Preferred Resolution (higher preference first)
     // 4. Seeders (more seeders first)
     const sortedAndScoredResults = resultsWithScore.sort((a, b) => {
       // 1. Sort by Match Score
@@ -896,7 +901,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
       // 4. Finally by seeders (more seeders first)
       return b.originalSeeders - a.originalSeeders;
     })
-    .slice(0, DEFAULT_CONFIG.maxResults); // Limit results after full sorting
+    .slice(0, DEFAULT_CONFIG.maxResults); // Apply maxResults after full sorting and filtering
 
     for (const link of sortedAndScoredResults) {
         // Use the createStremioStream utility to format the stream object
@@ -921,3 +926,4 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
 });
+
