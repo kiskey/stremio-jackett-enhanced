@@ -18,7 +18,7 @@ const MINIMUM_SEEDERS = parseInt(process.env.MINIMUM_SEEDERS || '0', 10);
 // --- Filtering and Sorting Configuration ---
 const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || '20', 10);
 const MIN_TORRENT_SIZE_MB = parseInt(process.env.MIN_TORRENT_SIZE_MB || '10', 10);
-const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '4096', 10);
+const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '8048', 10); // Matches .env.sample example
 
 const PREFERRED_LANGUAGES = (process.env.PREFERRED_LANGUAGES || '').toLowerCase().split(',').map(lang => lang.trim()).filter(lang => lang.length > 0);
 
@@ -167,7 +167,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.4.0', // Updated version for enhanced parsing and filtering
+    version: '1.5.0', // Updated version for enhanced parsing and filtering
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting, optimized with Worker Threads.',
     resources: ['stream'],
@@ -262,31 +262,40 @@ builder.defineStreamHandler(async (args) => {
         console.log(`[INFO] Worker returned ${processedStreams.length} processed and date-sorted streams to main thread.`);
 
         // --- Stage 3: Complex Quality Sort (on the top N candidates in main thread) ---
-        // Take up to 2x MAX_STREAMS from the worker's result to ensure we have enough for quality sort
+        // Taking up to 2x MAX_STREAMS from the worker's result (already date-sorted)
         const candidatesForFinalSort = processedStreams.slice(0, MAX_STREAMS * 2);
 
         const finalSortStartTime = performance.now();
         candidatesForFinalSort.sort((a, b) => {
-            // 1. Preferred Language (highest priority)
+            // 1. PublishedDate (descending) - This is the primary sort key now
+            const dateA = new Date(a.originalResult.PublishDate).getTime();
+            const dateB = new Date(b.originalResult.PublishedDate).getTime();
+            if (dateB !== dateA) {
+                return dateB - dateA;
+            }
+
+            // If dates are the same (or very close), then apply secondary quality sorting
+            // 2. Preferred Language (highest priority)
             if (a.hasPreferredLanguage && !b.hasPreferredLanguage) return -1;
             if (!a.hasPreferredLanguage && b.hasPreferredLanguage) return 1;
 
-            // 2. Resolution (descending)
+            // 3. Resolution (descending)
             if (a.resolutionRank !== b.resolutionRank) {
                 return b.resolutionRank - a.resolutionRank;
             }
 
-            // 3. Video Quality (descending)
+            // 4. Video Quality (descending)
             if (a.videoQualityRank !== b.videoQualityRank) {
                 return b.videoQualityRank - a.videoQualityRank;
             }
 
-            // 4. Audio Quality (descending)
+            // 5. Audio Quality (descending)
             if (a.audioQualityRank !== b.audioQualityRank) {
                 return b.audioQualityRank - a.audioQualityRank;
             }
 
-            // 5. Seeders (descending, final tie-breaker)
+            // 6. Seeders (descending, final tie-breaker)
+            // Acknowledging seeders might not be perfectly reliable for DHT-crawled magnets
             return b.originalResult.Seeders - a.originalResult.Seeders;
         });
         const finalSortEndTime = performance.now();
