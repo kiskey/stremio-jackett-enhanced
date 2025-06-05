@@ -79,7 +79,7 @@ async function getTmdbMetadata(imdbId, itemType) {
         const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&language=en-US&external_source=imdb_id`;
         const findResponse = await fetch(findUrl);
         if (!findResponse.ok) throw new Error(`TMDB Find API HTTP error: ${findResponse.statusText}`);
-        const findData = await findData.json();
+        const findData = await findResponse.json();
 
         let tmdbId = null;
         if (mediaType === 'movie' && findData.movie_results && findData.movie_results.length > 0) tmdbId = findData.movie_results[0].id;
@@ -165,7 +165,6 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
                 PREFERRED_LANGUAGES: config.PREFERRED_LANGUAGES,
                 PREFERRED_VIDEO_QUALITIES_CONFIG: config.PREFERRED_VIDEO_QUALITIES_CONFIG,
                 PREFERRED_AUDIO_QUALITIES_CONFIG: config.PREFERRED_AUDIO_QUALITIES_CONFIG,
-                // INITIAL_DATE_FILTER_LIMIT is no longer needed in worker as sorting/limiting is done in main thread query
             },
             publicTrackers: publicTrackers
         });
@@ -175,7 +174,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.7.0', // Updated version for direct API sorting and limiting
+    version: '1.7.1', // Updated version for direct API sorting and limiting, enhanced worker robustness
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting, optimized with Worker Threads.',
     resources: ['stream'],
