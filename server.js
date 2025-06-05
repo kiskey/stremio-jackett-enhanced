@@ -429,13 +429,15 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
     const allSources = [...new Set([...existingSources, ...newTrackers.map(t => `tracker:${t}`), `dht:${infoHash}`])];
 
     return {
-        // Set 'name' to the torrent's original title for primary display
-        name: tor.Title, 
+        // 'name' is often used for the provider or a concise quality label
+        name: `Jackett - ${resolution !== 'Unknown' ? resolution : tor.Tracker || 'Unknown'}`, 
+        // 'title' is commonly used for the full torrent title
+        title: tor.Title, 
+        // 'description' is the recommended field for detailed stream info
+        description: subtitle,
         type: type,
         infoHash: infoHash,
         sources: allSources,
-        // Set 'title' to the subtitle parts for secondary display (like below the name)
-        title: subtitle 
     };
 };
 
@@ -664,7 +666,7 @@ app.get('/manifest.json', (req, res) => {
 
   res.json({
     id: 'community.stremio.jackettaddon.enhanced', 
-    version: '1.0.6', // Incremented version for these fixes
+    version: '1.0.7', // Incremented version for these fixes
     name: 'Jackett Enhanced Streams',
     description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options. Prioritizes title-based searches for better relevance.',
     resources: ['catalog', 'stream'],
@@ -847,7 +849,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       metadataForValidation.akaTitles.forEach(akaTitle => {
           queries.push(akaTitle);
           if (metadataForValidation.year) {
-              queries.push(`${akaTitle} ${metadataForValidation.year}`);
+              queries.push(`${akaTitle} ${metadata.year}`);
           }
       });
   }
@@ -1003,7 +1005,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         if (metadata.year) {
             queriesToTry.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
         }
-        queriesTo.push({ q: metadata.title, cat: category }); // Title alone
+        // FIX: Changed 'queriesTo' to 'queriesToTry'
+        queriesToTry.push({ q: metadata.title, cat: category }); // Title alone
         if (type === 'series' && season && episode) {
             queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
             queriesToTry.push({ q: `${metadata.title} Season ${season} Episode ${episode}`, cat: category });
@@ -1199,5 +1202,3 @@ app.listen(PORT, async () => { // Made the listen callback async
   await fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
   log.info('[SERVER STARTUP] Public tracker pre-fetch complete.');
 });
-
-
