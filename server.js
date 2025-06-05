@@ -20,7 +20,7 @@ const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || '20', 10);
 const MIN_TORRENT_SIZE_MB = parseInt(process.env.MIN_TORRENT_SIZE_MB || '10', 10);
 const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '8048', 10); // Matches .env.sample example
 
-// New: Limit for initial date-based filtering in the worker
+// Limit for initial date-based filtering, applied directly in Jackett API query
 const INITIAL_DATE_FILTER_LIMIT = parseInt(process.env.INITIAL_DATE_FILTER_LIMIT || '100', 10);
 
 const PREFERRED_LANGUAGES = (process.env.PREFERRED_LANGUAGES || '').toLowerCase().split(',').map(lang => lang.trim()).filter(lang => lang.length > 0);
@@ -101,12 +101,16 @@ async function getTmdbMetadata(imdbId, itemType) {
 }
 
 /**
- * Performs a search on Jackett's Torznab API.
+ * Performs a search on Jackett's Torznab API, including sorting and limiting.
  */
 async function jackettSearch(query, imdbId, itemType, season, episode) {
     let url = `${JACKETT_HOST}/api/v2.0/indexers/all/results?apikey=${JACKETT_API_KEY}&Query=${encodeURIComponent(query)}`;
     if (imdbId) url += `&imdbid=${imdbId}`;
     if (itemType === 'series' && season && episode) url += `&season=${season}&ep=${episode}`;
+
+    // Add sort by posted date (descending) and limit the results directly from Jackett
+    url += `&sort=posted_desc`; // 'posted' is the Torznab equivalent for pubDate
+    url += `&limit=${INITIAL_DATE_FILTER_LIMIT}`; // Limit results fetched from Jackett
 
     try {
         const response = await fetch(url);
@@ -129,16 +133,14 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 
         worker.on('message', (message) => {
             if (message.error) {
-                // If the worker sent an error message, reject the promise
                 reject(new Error(`Worker Error: ${message.error}\nStack: ${message.stack}`));
             } else {
-                resolve(message); // Resolve with the processed streams
+                resolve(message);
             }
             worker.terminate();
         });
 
         worker.on('error', (err) => {
-            // This catches errors that occur directly on the worker thread, e.g., if the worker file itself can't load
             console.error('[ERROR] Worker thread encountered an unhandled error:', err);
             reject(err);
             worker.terminate();
@@ -146,7 +148,6 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 
         worker.on('exit', (code) => {
             if (code !== 0) {
-                // This catches if the worker process exits for any reason other than a controlled termination or an error event
                 console.error(`[ERROR] Worker thread exited unexpectedly with code ${code}. Check torrentProcessorWorker.js for unhandled exceptions.`);
                 reject(new Error(`Worker thread exited unexpectedly with code ${code}`));
             }
@@ -164,7 +165,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
                 PREFERRED_LANGUAGES: config.PREFERRED_LANGUAGES,
                 PREFERRED_VIDEO_QUALITIES_CONFIG: config.PREFERRED_VIDEO_QUALITIES_CONFIG,
                 PREFERRED_AUDIO_QUALITIES_CONFIG: config.PREFERRED_AUDIO_QUALITIES_CONFIG,
-                INITIAL_DATE_FILTER_LIMIT: config.INITIAL_DATE_FILTER_LIMIT // Pass the new config
+                // INITIAL_DATE_FILTER_LIMIT is no longer needed in worker as sorting/limiting is done in main thread query
             },
             publicTrackers: publicTrackers
         });
@@ -174,7 +175,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.6.2', // Updated version for worker stability and sorting logic
+    version: '1.7.0', // Updated version for direct API sorting and limiting
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting, optimized with Worker Threads.',
     resources: ['stream'],
@@ -204,7 +205,7 @@ builder.defineStreamHandler(async (args) => {
     console.log(`[INFO] Stream requested: Type=${itemType}, ID=${args.id}`);
     console.log(`[CONFIG] Filters: Min Seeders=${MINIMUM_SEEDERS}, Min Size=${MIN_TORRENT_SIZE_MB}MB, Max Size=${MAX_TORRENT_SIZE_MB}MB, Preferred Languages=[${PREFERRED_LANGUAGES.join(', ')}]`);
     console.log(`[CONFIG] Quality Prefs: Video=[${PREFERRED_VIDEO_QUALITIES_CONFIG.join(', ')}], Audio=[${PREFERRED_AUDIO_QUALITIES_CONFIG.join(', ')}]`);
-    console.log(`[CONFIG] Initial Date Filter Limit: ${INITIAL_DATE_FILTER_LIMIT}`);
+    console.log(`[CONFIG] Initial Date Filter Limit (via Jackett API): ${INITIAL_DATE_FILTER_LIMIT}`);
 
     try {
         const metadataStartTime = performance.now();
@@ -242,14 +243,15 @@ builder.defineStreamHandler(async (args) => {
         }
 
         const jackettSearchStartTime = performance.now();
-        console.log(`[INFO] Searching Jackett for: "${jackettQuery}" (IMDb: ${imdbId})`);
+        console.log(`[INFO] Searching Jackett for: "${jackettQuery}" (IMDb: ${imdbId}) with sort=posted_desc and limit=${INITIAL_DATE_FILTER_LIMIT}`);
         const jackettResults = await jackettSearch(jackettQuery, imdbId, determinedType, season, episode);
         const jackettSearchEndTime = performance.now();
         console.log(`[INFO] Jackett search returned ${jackettResults.length} raw results in ${((jackettSearchEndTime - jackettSearchStartTime) / 1000).toFixed(2)} seconds.`);
 
         // --- Offload heavy processing (filtering and parsing) to Worker Thread ---
         const workerProcessingStartTime = performance.now();
-        console.log('[INFO] Offloading torrent processing (initial date sort, filtering, parsing) to worker thread...');
+        console.log('[INFO] Offloading torrent processing (filtering, parsing) to worker thread...');
+        // Worker now receives results that are already date-sorted and limited by Jackett API
         const processedStreams = await processTorrentsInWorker(
             jackettResults,
             metadata,
@@ -262,7 +264,6 @@ builder.defineStreamHandler(async (args) => {
                 PREFERRED_LANGUAGES,
                 PREFERRED_VIDEO_QUALITIES_CONFIG,
                 PREFERRED_AUDIO_QUALITIES_CONFIG,
-                INITIAL_DATE_FILTER_LIMIT: INITIAL_DATE_FILTER_LIMIT // Pass the new config
             },
             publicTrackers
         );
@@ -271,7 +272,8 @@ builder.defineStreamHandler(async (args) => {
         console.log(`[INFO] Worker returned ${processedStreams.length} filtered and parsed streams to main thread.`);
 
         // --- Stage 3: Apply full multi-criteria sort in main thread ---
-        const candidatesForFinalSort = processedStreams; // Sort all processed for accuracy
+        // Results from worker are already largely date-sorted (from Jackett API)
+        const candidatesForFinalSort = processedStreams;
 
         const finalSortStartTime = performance.now();
         candidatesForFinalSort.sort((a, b) => {
@@ -364,5 +366,4 @@ fetchAndCacheTrackers().then(() => {
 serveHTTP(builder.getInterface(), { port: 7000 });
 
 console.log('[INFO] Logging Level: info');
-console.log(`[INFO] Response Timeout: ${RESPONSE_TIMEOUT_MS}ms`);
 console.log(`[INFO] Addon is listening on http://127.0.0.1:7000/manifest.json (default port)`);
