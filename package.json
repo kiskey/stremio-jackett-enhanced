@@ -1,6 +1,6 @@
 {
   "name": "stremio-jackett-addon",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Stremio addon to stream P2P torrents from Jackett with advanced filtering and validation, optimized with Worker Threads.",
   "main": "server.js",
   "scripts": {
@@ -18,7 +18,6 @@
   "author": "Your Name",
   "license": "MIT",
   "dependencies": {
-    "lodash.get": "^4.4.2",
     "stremio-addon-sdk": "^1.2.0",
     "dotenv": "^16.4.5"
   },
