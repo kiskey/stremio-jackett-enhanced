@@ -126,22 +126,25 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 
         worker.on('message', (message) => {
             if (message.error) {
+                // If the worker sent an error message, reject the promise
                 reject(new Error(`Worker Error: ${message.error}\nStack: ${message.stack}`));
             } else {
-                resolve(message);
+                resolve(message); // Resolve with the processed streams
             }
             worker.terminate();
         });
 
         worker.on('error', (err) => {
-            console.error('[ERROR] Worker thread error:', err);
+            // This catches errors that occur directly on the worker thread, e.g., if the worker file itself can't load
+            console.error('[ERROR] Worker thread encountered an unhandled error:', err);
             reject(err);
             worker.terminate();
         });
 
         worker.on('exit', (code) => {
             if (code !== 0) {
-                console.error(`[ERROR] Worker thread exited with code ${code}. Check torrentProcessorWorker.js for unhandled exceptions.`);
+                // This catches if the worker process exits for any reason other than a controlled termination or an error event
+                console.error(`[ERROR] Worker thread exited unexpectedly with code ${code}. Check torrentProcessorWorker.js for unhandled exceptions.`);
                 reject(new Error(`Worker thread exited unexpectedly with code ${code}`));
             }
         });
@@ -167,7 +170,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.5.0', // Updated version for enhanced parsing and filtering
+    version: '1.6.0', // Updated version for worker stability and sorting logic
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting, optimized with Worker Threads.',
     resources: ['stream'],
@@ -239,9 +242,10 @@ builder.defineStreamHandler(async (args) => {
         const jackettSearchEndTime = performance.now();
         console.log(`[INFO] Jackett search returned ${jackettResults.length} raw results in ${((jackettSearchEndTime - jackettSearchStartTime) / 1000).toFixed(2)} seconds.`);
 
-        // --- Offload heavy processing to Worker Thread ---
+        // --- Offload heavy processing (filtering and parsing) to Worker Thread ---
         const workerProcessingStartTime = performance.now();
-        console.log('[INFO] Offloading torrent processing to worker thread...');
+        console.log('[INFO] Offloading torrent processing (filtering, parsing) to worker thread...');
+        // The worker now returns UNsorted (by date) streams, main thread will handle full sort
         const processedStreams = await processTorrentsInWorker(
             jackettResults,
             metadata,
@@ -259,48 +263,54 @@ builder.defineStreamHandler(async (args) => {
         );
         const workerProcessingEndTime = performance.now();
         console.log(`[INFO] Worker processing completed. Time: ${((workerProcessingEndTime - workerProcessingStartTime) / 1000).toFixed(2)} seconds.`);
-        console.log(`[INFO] Worker returned ${processedStreams.length} processed and date-sorted streams to main thread.`);
+        console.log(`[INFO] Worker returned ${processedStreams.length} filtered and parsed streams to main thread.`);
 
-        // --- Stage 3: Complex Quality Sort (on the top N candidates in main thread) ---
-        // Taking up to 2x MAX_STREAMS from the worker's result (already date-sorted)
-        const candidatesForFinalSort = processedStreams.slice(0, MAX_STREAMS * 2);
+        // --- Stage 3: Apply full multi-criteria sort in main thread ---
+        // We might take more than MAX_STREAMS from the worker's result before sorting to ensure enough candidates
+        const candidatesForFinalSort = processedStreams; // No slicing here, sort all processed for accuracy
 
         const finalSortStartTime = performance.now();
         candidatesForFinalSort.sort((a, b) => {
-            // 1. PublishedDate (descending) - This is the primary sort key now
-            const dateA = new Date(a.originalResult.PublishDate).getTime();
-            const dateB = new Date(b.originalResult.PublishedDate).getTime();
-            if (dateB !== dateA) {
-                return dateB - dateA;
+            // 1. Seeders (descending) - Highest priority as per latest request
+            if (b.originalResult.Seeders !== a.originalResult.Seeders) {
+                return b.originalResult.Seeders - a.originalResult.Seeders;
             }
 
-            // If dates are the same (or very close), then apply secondary quality sorting
-            // 2. Preferred Language (highest priority)
+            // 2. PublishedDate (descending) - Second highest priority
+            // Ensure dates are valid before comparison
+            const dateA = new Date(a.originalResult.PublishedDate).getTime();
+            const dateB = new Date(b.originalResult.PublishedDate).getTime();
+            if (!isNaN(dateA) && !isNaN(dateB) && dateB !== dateA) {
+                return dateB - dateA;
+            }
+            // If one date is invalid and the other is valid, prioritize the valid one (more recent if 'invalid' implies 'old' or 'missing')
+            if (isNaN(dateA) && !isNaN(dateB)) return 1; // b is valid, a is invalid, b comes first (a is 'later')
+            if (!isNaN(dateA) && isNaN(dateB)) return -1; // a is valid, b is invalid, a comes first
+
+            // If seeders and dates are the same (or invalid/equal), then apply quality sorting
+            // 3. Preferred Language (prioritize preferred, then original order)
             if (a.hasPreferredLanguage && !b.hasPreferredLanguage) return -1;
             if (!a.hasPreferredLanguage && b.hasPreferredLanguage) return 1;
 
-            // 3. Resolution (descending)
+            // 4. Resolution (descending)
             if (a.resolutionRank !== b.resolutionRank) {
                 return b.resolutionRank - a.resolutionRank;
             }
 
-            // 4. Video Quality (descending)
+            // 5. Video Quality (descending)
             if (a.videoQualityRank !== b.videoQualityRank) {
                 return b.videoQualityRank - a.videoQualityRank;
             }
 
-            // 5. Audio Quality (descending)
+            // 6. Audio Quality (descending)
             if (a.audioQualityRank !== b.audioQualityRank) {
                 return b.audioQualityRank - a.audioQualityRank;
             }
 
-            // 6. Seeders (descending, final tie-breaker)
-            // Acknowledging seeders might not be perfectly reliable for DHT-crawled magnets
-            return b.originalResult.Seeders - a.originalResult.Seeders;
+            return 0; // If all criteria are equal, maintain original relative order
         });
         const finalSortEndTime = performance.now();
         console.log(`[INFO] Main thread final sorting time: ${((finalSortEndTime - finalSortStartTime) / 1000).toFixed(2)} seconds.`);
-
 
         // --- Stage 4: Format for Stremio and apply final MAX_STREAMS limit ---
         const stremioStreams = [];
@@ -317,7 +327,7 @@ builder.defineStreamHandler(async (args) => {
             if (stream.parsedDetails.language) titleParts.push(stream.parsedDetails.language.charAt(0).toUpperCase() + stream.parsedDetails.language.slice(1));
             titleParts.push(`S:${result.Seeders}`, `L:${result.Peers}`, `Size:${torrentSizeMB}MB`);
 
-            // Construct sources array with individual trackers and DHT node, without the full magnet link
+            // Construct sources array with individual trackers and DHT node, as per Stremio documentation
             const streamSources = publicTrackers.map(trackerUrl => `tracker:${trackerUrl}`);
             streamSources.push(`dht:${stream.infoHash}`);
 
@@ -325,11 +335,7 @@ builder.defineStreamHandler(async (args) => {
                 name: `Jackett | ${result.Tracker}`,
                 title: titleParts.join(' | '),
                 infoHash: stream.infoHash,
-                // Only include individual tracker URLs and DHT node in sources, not the full magnet link
-                sources: streamSources,
-                // The full magnet link can optionally be added as a separate property if Stremio uses it,
-                // but infoHash + sources is the standard for torrent discovery.
-                // magnetURI: stream.magnetLink // This line is commented out as it's not a standard Stream Object property.
+                sources: streamSources, // Only individual trackers and DHT as sources
             });
         }
 
