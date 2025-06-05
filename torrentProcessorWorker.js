@@ -61,7 +61,8 @@ function standardizeTitle(title) {
 
     // Remove common release group tags, quality tags, and other extraneous info
     // This regex is extended based on observed patterns in torrent titles
-    standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|subs)\b/g, ' ');
+    standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|generalfilm|nahom|edge2020|xvi|mp3|eac3|subs)\b/g, ' ');
+    // Added based on samples: FREELEECH, RG, tru (too generic, handled by general removal), DiN, XVID, T0M, WAR, Hurtom, Rutracker, Generalfilm, NAHOM, ETRG, EtHD, s (from BDRip_s), Bonus (remove), VFF, VFQ (French audio, keep for language, remove for standardization), DDP (part of audio, keep in parse), etc.
 
     // Remove year if it's still present and surrounded by spaces
     if (extractedYear) {
@@ -131,6 +132,8 @@ function getTorrentLanguage(torrentTitle) {
         'ukr': 'ukrainian', 'ukrainian': 'ukrainian', // Added based on sample
         'ita': 'italian', 'italian': 'italian',     // Added based on sample
         'fre': 'french', 'french': 'french',       // Added based on sample
+        'duo': 'dual-audio', // Common for dual audio
+        'multi': 'multi-language' // Common for multi-language
     };
 
     for (const key in languageMap) {
@@ -177,7 +180,8 @@ function parseTorrentDetails(torrentTitle) {
     }
 
     // Audio Quality: e.g., truehd, dts-hd, atmos, dts, ac3, aac, mp3, eac3, ddp
-    const audioQualityMatches = lowerTitle.match(/(truehd|dts-hd|atmos|dts|eac3|ddp|ac3|aac|mp3|dd\+?5\.1|dd\+?7\.1)/g);
+    // Also include channel info if possible (e.g., 5.1, 7.1) for better context
+    const audioQualityMatches = lowerTitle.match(/(truehd|dts-hd|atmos|dts|eac3|ddp|ac3|aac|mp3|(\d\.\d)|(ch))(\s*(ma))?/g); // Added MA for DTS-HD MA
     if (audioQualityMatches) {
         for (const prefQuality of PREFERRED_AUDIO_QUALITIES_CONFIG) {
             if (audioQualityMatches.includes(prefQuality)) {
@@ -203,7 +207,7 @@ function getResolutionRank(resolution) {
         case '2160p': return 4;
         case '1080p': return 3;
         case '720p': return 2;
-        case '576p': // Example from sample
+        case '576p':
         case '480p': return 1;
         default: return 0; // Unknown or not found
     }
@@ -249,7 +253,13 @@ parentPort.on('message', (message) => {
         const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
 
         for (const result of jackettResults) {
-            // Use simpleGet instead of lodash.get
+            // --- Early Filtering of low-quality types ---
+            const lowerTitle = result.Title.toLowerCase();
+            if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
+                continue; // Skip TS/Telecine
+            }
+
+            // --- Basic InfoHash/MagnetUri Validation ---
             if (!result.InfoHash && !simpleGet(result, 'MagnetUri')) continue;
 
             let infoHash = result.InfoHash || simpleGet(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1];
@@ -258,27 +268,18 @@ parentPort.on('message', (message) => {
 
             if (processedInfoHashes.has(infoHash)) continue;
 
-            // --- New: Pre-filtering low-quality results ---
-            const lowerTitle = result.Title.toLowerCase();
-
-            // Filter out TS/Telecine
-            if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
-                // console.log(`[WORKER][FILTERED] Low quality (TS/Telecine): ${result.Title}`); // Too verbose for worker
-                continue;
-            }
-
-            // Parse details early for resolution filtering
-            const parsedDetails = parseTorrentDetails(result.Title);
-
-            // Filter out resolutions less than 720p
-            if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
-                // console.log(`[WORKER][FILTERED] Low resolution (<720p): ${result.Title} (${parsedDetails.resolution || 'N/A'})`); // Too verbose
-                continue;
-            }
-
-            // Existing validations and filters
+            // --- Validate Torrent Title vs. Expected Metadata ---
             if (!validateTorrentTitle(metadata, season, episode, result.Title)) continue;
 
+            // --- Parse Torrent Details (Resolution, Quality, Language) ---
+            const parsedDetails = parseTorrentDetails(result.Title);
+
+            // --- Filter out resolutions less than 720p (early) ---
+            if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
+                continue; // Skip resolutions below 720p
+            }
+
+            // --- Existing Filters (Seeders, Size, Language Preference) ---
             if (result.Seeders < MINIMUM_SEEDERS) {
                 continue;
             }
@@ -288,7 +289,7 @@ parentPort.on('message', (message) => {
                 continue;
             }
 
-            const detectedLanguage = getTorrentLanguage(result.Title);
+            const detectedLanguage = parsedDetails.language; // Use language from parsedDetails
             if (PREFERRED_LANGUAGES.length > 0) {
                 if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
                     continue;
@@ -303,11 +304,11 @@ parentPort.on('message', (message) => {
                 originalResult: result,
                 magnetLink: magnetLink,
                 infoHash: infoHash,
-                parsedDetails: parsedDetails, // Already parsed, reuse
+                parsedDetails: parsedDetails, // Reuse parsed details
                 resolutionRank: getResolutionRank(parsedDetails.resolution),
                 videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
                 audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
-                hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && parsedDetails.language && PREFERRED_LANGUAGES.includes(parsedDetails.language),
+                hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && detectedLanguage && PREFERRED_LANGUAGES.includes(detectedLanguage),
             });
         }
 
@@ -317,8 +318,7 @@ parentPort.on('message', (message) => {
         parentPort.postMessage(processedStreams);
     } catch (err) {
         console.error(`[ERROR][WORKER] Unhandled error during torrent processing: ${err.message}`);
-        console.error(err.stack); // Log the full stack trace for debugging
-        // Send an error message back to the main thread
+        console.error(err.stack); // Log the full stack trace
         parentPort.postMessage({ error: err.message, stack: err.stack });
     }
 });
