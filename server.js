@@ -1,8 +1,7 @@
 // server.js - Stremio Addon for Jackett Integration with advanced features
 
-// Corrected import: 'addonBuilder' and 'serveHTTP' are exported directly
 const { addonBuilder, get, serveHTTP } = require('stremio-addon-sdk');
-const { performance } = require('perf_hooks'); // For measuring execution time
+const { performance } = require('perf_hooks');
 require('dotenv').config(); // Load environment variables from .env file
 
 // --- Configuration (Set these as environment variables or update directly) ---
@@ -12,16 +11,24 @@ const OMDb_API_KEY = process.env.OMDB_API_KEY || 'YOUR_OMDB_API_KEY_HERE';     /
 const TMDB_API_KEY = process.env.TMDB_API_KEY || 'YOUR_TMDB_API_KEY_HERE';     // !!! IMPORTANT: Replace with your actual TMDB API Key !!!
 
 const TRACKERS_URL = process.env.TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_best.txt';
-const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS || '20000', 10); // Max time to respond to Stremio
-const MINIMUM_SEEDERS = parseInt(process.env.MINIMUM_SEEDERS || '0', 10); // Minimum seeders for a torrent to be considered
+const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS || '20000', 10);
+const MINIMUM_SEEDERS = parseInt(process.env.MINIMUM_SEEDERS || '0', 10);
 
-// --- New Filtering and Sorting Configuration ---
-const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || '20', 10); // Maximum number of streams to return to Stremio
-const MIN_TORRENT_SIZE_MB = parseInt(process.env.MIN_TORRENT_SIZE_MB || '10', 10); // Minimum allowed torrent size in MB
-const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '4096', 10); // Maximum allowed torrent size in MB (e.g., 4GB)
+// --- Filtering and Sorting Configuration ---
+const MAX_STREAMS = parseInt(process.env.MAX_STREAMS || '20', 10);
+const MIN_TORRENT_SIZE_MB = parseInt(process.env.MIN_TORRENT_SIZE_MB || '10', 10);
+const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '4096', 10); // e.g., 4GB
+
+// Preferred languages for filtering/sorting (comma-separated string from ENV, then lowercased array)
 const PREFERRED_LANGUAGES = (process.env.PREFERRED_LANGUAGES || '').toLowerCase().split(',').map(lang => lang.trim()).filter(lang => lang.length > 0);
-const SORT_BY = process.env.SORT_BY || 'seeders'; // 'seeders', 'size', 'recent'
-const SORT_ORDER = process.env.SORT_ORDER || 'desc'; // 'asc', 'desc'
+
+// New: Preferred video qualities for sorting (from best to worst, higher index = lower preference)
+const PREFERRED_VIDEO_QUALITIES_CONFIG = (process.env.PREFERRED_VIDEO_QUALITIES || 'remux,bluray,web-dl,webrip,hdrip,hdtv,dvdrip').toLowerCase().split(',').map(q => q.trim());
+// New: Preferred audio qualities for sorting (from best to worst, higher index = lower preference)
+const PREFERRED_AUDIO_QUALITIES_CONFIG = (process.env.PREFERRED_AUDIO_QUALITIES || 'truehd,dts-hd,atmos,dts,ac3,aac,mp3').toLowerCase().split(',').map(q => q.trim());
+
+const SORT_BY = process.env.SORT_BY || 'recent'; // Default to 'recent' for initial sort
+const SORT_ORDER = process.env.SORT_ORDER || 'desc'; // Default to 'desc'
 
 // --- Global Cache for Public Trackers ---
 let publicTrackers = [];
@@ -175,7 +182,7 @@ function buildMagnetLink(infoHash, trackers) {
     return `magnet:?xt=urn:btih:${infoHash}&${trackerParams}`;
 }
 
-// --- Utility Functions for Validation and Filtering ---
+// --- Utility Functions for Validation, Parsing, and Filtering ---
 
 /**
  * Sanitizes and standardizes a title for robust comparison.
@@ -211,8 +218,7 @@ function standardizeTitle(title) {
     // Replace multiple spaces with a single space and trim
     standardized = standardized.replace(/\s+/g, ' ').trim();
 
-    // Remove common release group tags and other extraneous info
-    // This regex is a simplified example and can be extended based on observed patterns
+    // Remove common release group tags and other extraneous info that might confuse validation
     standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2})\b/g, ' ');
 
     // Again, replace multiple spaces with a single space and trim
@@ -254,6 +260,7 @@ function validateTorrentTitle(metadata, season, episode, torrentTitle) {
         // For series, ensure season and episode identifiers are present
         if (season && episode) {
             const seasonEpisodeIdentifier = `s${String(season).padStart(2, '0')}e${String(episode).padStart(2, '0')}`;
+            // Use includes to allow for variations like 'S01.E01', 'S01E01'
             if (!torrentStandardizedTitle.includes(seasonEpisodeIdentifier)) {
                 console.log(`[VALIDATION FAILED] Season/Episode mismatch (Series): Expected="${seasonEpisodeIdentifier}", Got="${torrentStandardizedTitle}" (Original: "${torrentTitle}")`);
                 return false;
@@ -266,40 +273,104 @@ function validateTorrentTitle(metadata, season, episode, torrentTitle) {
 }
 
 /**
- * Detects the language from a torrent title based on common tags.
- * @param {string} torrentTitle - The torrent title to analyze.
- * @returns {string|null} - Detected language (e.g., 'english', 'hindi') or null if not found.
+ * Extracts detailed quality information from a torrent title.
+ * @param {string} torrentTitle - The torrent title to parse.
+ * @returns {Object} - Object containing parsed details (resolution, videoQuality, audioQuality, language).
  */
-function getTorrentLanguage(torrentTitle) {
+function parseTorrentDetails(torrentTitle) {
     const lowerTitle = torrentTitle.toLowerCase();
-    const languageMap = {
-        'eng': 'english', 'english': 'english',
-        'hin': 'hindi', 'hindi': 'hindi',
-        'tam': 'tamil', 'tamil': 'tamil',
-        'mal': 'malayalam', 'malayalam': 'malayalam',
-        'kan': 'kannada', 'kannada': 'kannada',
-        'chn': 'chinese', 'chinese': 'chinese',
-        'kor': 'korean', 'korean': 'korean',
-        'spa': 'spanish', 'spanish': 'spanish',
-        'ger': 'german', 'german': 'german',
-        'jpn': 'japanese', 'japanese': 'japanese',
-        // Add more common language tags/keywords as needed
-    };
+    let resolution = null;
+    let videoQuality = null;
+    let audioQuality = null;
+    let language = getTorrentLanguage(torrentTitle); // Reuse existing language detection
 
-    for (const key in languageMap) {
-        if (lowerTitle.includes(key)) {
-            return languageMap[key];
+    // Resolution: e.g., 2160p, 1080p, 720p, 480p, 4k
+    const resolutionMatch = lowerTitle.match(/(\d{3,4}p|4k|uhd|fhd)/);
+    if (resolutionMatch) {
+        resolution = resolutionMatch[1];
+        // Normalize 4k/uhd/fhd to 2160p for consistent ranking
+        if (['4k', 'uhd', 'fhd'].includes(resolution)) {
+            resolution = '2160p';
         }
     }
-    return null;
+
+    // Video Quality: e.g., web-dl, bluray, remux, hdtv, webrip, hdrip, x264, x265, hevc, hdr
+    const videoQualityMatches = lowerTitle.match(/(remux|bluray|web-dl|webrip|hdrip|hdtv|dvdrip|x264|x265|hevc|hdr)/g);
+    if (videoQualityMatches) {
+        // Prioritize based on config or a predefined hierarchy if multiple matches
+        // For simplicity, take the first one that matches our preferred list, or just the first if no config match
+        for (const prefQuality of PREFERRED_VIDEO_QUALITIES_CONFIG) {
+            if (videoQualityMatches.includes(prefQuality)) {
+                videoQuality = prefQuality;
+                break;
+            }
+        }
+        if (!videoQuality && videoQualityMatches.length > 0) {
+            videoQuality = videoQualityMatches[0]; // Fallback to first found
+        }
+    }
+
+    // Audio Quality: e.g., dts-hd, truehd, atmos, dts, ac3, aac, mp3
+    const audioQualityMatches = lowerTitle.match(/(truehd|dts-hd|atmos|dd\+?5\.1|dd\+?7\.1|ac3|aac|mp3)/g);
+    if (audioQualityMatches) {
+        // Prioritize based on config or a predefined hierarchy
+        for (const prefQuality of PREFERRED_AUDIO_QUALITIES_CONFIG) {
+            if (audioQualityMatches.includes(prefQuality)) {
+                audioQuality = prefQuality;
+                break;
+            }
+        }
+        if (!audioQuality && audioQualityMatches.length > 0) {
+            audioQuality = audioQualityMatches[0]; // Fallback to first found
+        }
+    }
+
+    return { resolution, videoQuality, audioQuality, language };
+}
+
+/**
+ * Ranks a resolution based on a predefined hierarchy. Higher value means better quality.
+ * @param {string|null} resolution - The detected resolution string.
+ * @returns {number} - Numeric rank.
+ */
+function getResolutionRank(resolution) {
+    switch (resolution) {
+        case '2160p': return 4;
+        case '1080p': return 3;
+        case '720p': return 2;
+        case '480p': return 1;
+        default: return 0; // Unknown or not found
+    }
+}
+
+/**
+ * Ranks a video quality based on the PREFERRED_VIDEO_QUALITIES_CONFIG. Higher value means better quality.
+ * @param {string|null} quality - The detected video quality string.
+ * @returns {number} - Numeric rank.
+ */
+function getVideoQualityRank(quality) {
+    if (!quality) return 0;
+    const index = PREFERRED_VIDEO_QUALITIES_CONFIG.indexOf(quality);
+    return index !== -1 ? PREFERRED_VIDEO_QUALITIES_CONFIG.length - index : 0; // Higher rank for earlier preferred qualities
+}
+
+/**
+ * Ranks an audio quality based on the PREFERRED_AUDIO_QUALITIES_CONFIG. Higher value means better quality.
+ * @param {string|null} quality - The detected audio quality string.
+ * @returns {number} - Numeric rank.
+ */
+function getAudioQualityRank(quality) {
+    if (!quality) return 0;
+    const index = PREFERRED_AUDIO_QUALITIES_CONFIG.indexOf(quality);
+    return index !== -1 ? PREFERRED_AUDIO_QUALITIES_CONFIG.length - index : 0; // Higher rank for earlier preferred qualities
 }
 
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.1.3', // Updated version for bug fix
+    version: '1.2.0', // Updated version for new features
     name: 'Jackett Stream Provider',
-    description: 'Provides P2P streams sourced from Jackett with advanced filtering and validation.',
+    description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting.',
     resources: ['stream'],
     types: ['movie', 'series'],
     catalogs: [], // No catalogs needed as it provides streams dynamically
@@ -312,24 +383,22 @@ const builder = new addonBuilder({
 builder.defineStreamHandler(async (args) => {
     const startTime = performance.now(); // Mark the start of processing
 
-    // Extract IMDb ID and item type from the Stremio request arguments
-    // args.id can be 'tt1234567' for movies or 'tt1234567:S01E01' for series episodes
     const imdbId = args.id.split(':')[0];
-    const itemType = args.type; // 'movie' or 'series'
+    const itemType = args.type;
 
     let season, episode;
-    // If it's a series, parse season and episode numbers
     if (itemType === 'series') {
         const parts = args.id.split(':');
         if (parts.length === 3) {
-            season = parseInt(parts[1].substring(1), 10); // e.g., 'S01' -> 1
-            episode = parseInt(parts[2].substring(1), 10); // e.g., 'E01' -> 1
+            season = parseInt(parts[1].substring(1), 10);
+            episode = parseInt(parts[2].substring(1), 10);
         }
     }
 
     console.log(`[INFO] Stream requested: Type=${itemType}, ID=${args.id}`);
     console.log(`[CONFIG] Filters: Min Seeders=${MINIMUM_SEEDERS}, Min Size=${MIN_TORRENT_SIZE_MB}MB, Max Size=${MAX_TORRENT_SIZE_MB}MB, Preferred Languages=[${PREFERRED_LANGUAGES.join(', ')}]`);
-    console.log(`[CONFIG] Sorting: By='${SORT_BY}', Order='${SORT_ORDER}'`);
+    console.log(`[CONFIG] Sorting: Initial by='${SORT_BY}' order='${SORT_ORDER}', Quality Prefs: Video=[${PREFERRED_VIDEO_QUALITIES_CONFIG.join(', ')}], Audio=[${PREFERRED_AUDIO_QUALITIES_CONFIG.join(', ')}]`);
+
 
     try {
         // --- Step 1: Fetch metadata in parallel from OMDb and TMDB ---
@@ -339,28 +408,24 @@ builder.defineStreamHandler(async (args) => {
         ]);
 
         let metadata = null;
-        let searchQueryTitle = imdbId; // Fallback title
-        let determinedType = itemType; // Default to the requested type
+        let searchQueryTitle = imdbId;
+        let determinedType = itemType;
 
-        // Prioritize OMDb metadata if available and successful
         if (omdbResult.status === 'fulfilled' && omdbResult.value) {
             metadata = omdbResult.value;
             searchQueryTitle = metadata.title;
             determinedType = metadata.type;
             console.log(`[INFO] Metadata from OMDb: Title="${metadata.title}", Year="${metadata.year}", Type="${metadata.type}"`);
         } else if (tmdbResult.status === 'fulfilled' && tmdbResult.value) {
-            // Fallback to TMDB metadata
             metadata = tmdbResult.value;
             searchQueryTitle = metadata.title;
             determinedType = metadata.type;
             console.log(`[INFO] Metadata from TMDB: Title="${metadata.title}", Year="${metadata.year}", Type="${metadata.type}"`);
         } else {
             console.warn(`[WARN] Could not retrieve metadata for ${imdbId} from OMDb or TMDB. Proceeding with IMDb ID as fallback.`);
-            // If no metadata, create a fallback metadata object for validation (title will be imdbId)
             metadata = { title: imdbId, year: null, type: itemType };
         }
 
-        // Construct the search query for Jackett
         let jackettQuery = searchQueryTitle;
         if (determinedType === 'movie' && metadata.year) {
             jackettQuery = `${searchQueryTitle} ${metadata.year}`;
@@ -373,108 +438,112 @@ builder.defineStreamHandler(async (args) => {
         const jackettResults = await jackettSearch(jackettQuery, imdbId, determinedType, season, episode);
         console.log(`[INFO] Jackett returned ${jackettResults.length} raw results.`);
 
-        // --- Step 3: Process, Filter, and Validate Jackett results ---
-        const validStreams = [];
-        const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
+        // --- Stage 1: Initial Filtering & Date Sort ---
+        const initialFilteredResults = [];
+        const processedInfoHashes = new Set();
 
         for (const result of jackettResults) {
-            // 3.1 Basic validation: ensure we have an InfoHash or MagnetUri
-            if (!result.InfoHash && !result.MagnetUri) {
-                // console.debug(`[DEBUG] Skipping result without InfoHash or MagnetUri:`, result.Title);
-                continue;
-            }
+            if (!result.InfoHash && !result.MagnetUri) continue;
 
             let infoHash = result.InfoHash || get(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1];
-            if (!infoHash) {
-                // console.debug(`[DEBUG] Skipping result as InfoHash could not be determined:`, result.Title);
-                continue;
-            }
+            if (!infoHash) continue;
             infoHash = infoHash.toLowerCase();
 
-            // Skip if this infoHash has already been processed (duplicate)
-            if (processedInfoHashes.has(infoHash)) {
-                // console.debug(`[DEBUG] Skipping duplicate infoHash: ${infoHash} for ${result.Title}`);
-                continue;
-            }
+            if (processedInfoHashes.has(infoHash)) continue;
 
-            // 3.2 Robust Torrent Title and Year Validation
-            if (!validateTorrentTitle(metadata, season, episode, result.Title)) {
-                continue; // Skip if title validation fails
-            }
+            if (!validateTorrentTitle(metadata, season, episode, result.Title)) continue;
 
-            // 3.3 Filter by minimum seeders
             if (result.Seeders < MINIMUM_SEEDERS) {
                 console.log(`[FILTERED] Low seeders (${result.Seeders} < ${MINIMUM_SEEDERS}): ${result.Title}`);
                 continue;
             }
 
-            // 3.4 Size Filtering
-            const torrentSizeMB = result.Size / (1024 * 1024); // Convert bytes to MB
+            const torrentSizeMB = result.Size / (1024 * 1024);
             if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
                 console.log(`[FILTERED] Size out of range (${torrentSizeMB.toFixed(2)}MB, min:${MIN_TORRENT_SIZE_MB}, max:${MAX_TORRENT_SIZE_MB}): ${result.Title}`);
                 continue;
             }
-
-            // 3.5 Language Filtering
-            const detectedLanguage = getTorrentLanguage(result.Title);
-            if (PREFERRED_LANGUAGES.length > 0) {
-                if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
-                    console.log(`[FILTERED] Language not preferred (Detected: ${detectedLanguage || 'none'}, Preferred: ${PREFERRED_LANGUAGES.join(', ')}): ${result.Title}`);
-                    continue;
-                }
-            }
-            // If PREFERRED_LANGUAGES is empty, all languages are allowed, so no filtering needed.
-
-            // If all validations and filters pass, add to valid streams
+            
+            // Add to initial filtered results
             processedInfoHashes.add(infoHash);
-            validStreams.push({
-                originalResult: result, // Keep original result for sorting
-                magnetLink: buildMagnetLink(infoHash, publicTrackers),
-                infoHash: infoHash,
+            initialFilteredResults.push(result);
+        }
+
+        console.log(`[INFO] Initial filtered down to ${initialFilteredResults.length} results.`);
+
+        // Sort by PublishedDate (most recent first)
+        initialFilteredResults.sort((a, b) => {
+            const dateA = new Date(a.PublishDate).getTime();
+            const dateB = new Date(b.PublishDate).getTime();
+            return dateB - dateA; // Descending order
+        });
+
+        // --- Stage 2: Limit to Top N Candidates ---
+        const topNCandidates = initialFilteredResults.slice(0, MAX_STREAMS * 2); // Take more than MAX_STREAMS to allow for further quality filtering
+
+        // --- Stage 3: Detailed Parsing & Complex Quality Sort ---
+        const finalStreams = [];
+
+        for (const result of topNCandidates) {
+            const parsedDetails = parseTorrentDetails(result.Title);
+            const magnetLink = buildMagnetLink(result.InfoHash || get(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1], publicTrackers);
+
+            finalStreams.push({
+                originalResult: result,
+                magnetLink: magnetLink,
+                infoHash: result.InfoHash || get(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1].toLowerCase(),
+                parsedDetails: parsedDetails, // Store parsed details for sorting
+                resolutionRank: getResolutionRank(parsedDetails.resolution),
+                videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
+                audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
+                hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && parsedDetails.language && PREFERRED_LANGUAGES.includes(parsedDetails.language),
             });
         }
 
-        console.log(`[INFO] Processed and filtered down to ${validStreams.length} valid results.`);
+        // Complex sorting based on quality, resolution, language, then seeders
+        finalStreams.sort((a, b) => {
+            // 1. Preferred Language (highest priority)
+            if (a.hasPreferredLanguage && !b.hasPreferredLanguage) return -1;
+            if (!a.hasPreferredLanguage && b.hasPreferredLanguage) return 1;
 
-        // --- Step 4: Sort the valid streams ---
-        validStreams.sort((a, b) => {
-            let valA, valB;
-
-            switch (SORT_BY) {
-                case 'seeders':
-                    valA = a.originalResult.Seeders;
-                    valB = b.originalResult.Seeders;
-                    break;
-                case 'size':
-                    valA = a.originalResult.Size; // Sort by bytes, then convert for display
-                    valB = b.originalResult.Size;
-                    break;
-                case 'recent':
-                    valA = new Date(a.originalResult.PublishDate).getTime();
-                    valB = new Date(b.originalResult.PublishDate).getTime();
-                    break;
-                default: // Default to seeders
-                    valA = a.originalResult.Seeders;
-                    valB = b.originalResult.Seeders;
+            // 2. Resolution (descending)
+            if (a.resolutionRank !== b.resolutionRank) {
+                return b.resolutionRank - a.resolutionRank;
             }
 
-            if (SORT_ORDER === 'asc') {
-                return valA - valB;
-            } else {
-                return valB - valA;
+            // 3. Video Quality (descending)
+            if (a.videoQualityRank !== b.videoQualityRank) {
+                return b.videoQualityRank - a.videoQualityRank;
             }
+
+            // 4. Audio Quality (descending)
+            if (a.audioQualityRank !== b.audioQualityRank) {
+                return b.audioQualityRank - a.audioQualityRank;
+            }
+
+            // 5. Seeders (descending, final tie-breaker)
+            // Note: Acknowledging that seeders might not be perfectly reliable for DHT-crawled magnets
+            return b.originalResult.Seeders - a.originalResult.Seeders;
         });
 
-        // --- Step 5: Format for Stremio and apply MAX_STREAMS limit ---
+        // --- Stage 4: Format for Stremio and apply MAX_STREAMS limit ---
         const stremioStreams = [];
-        for (let i = 0; i < Math.min(validStreams.length, MAX_STREAMS); i++) {
-            const stream = validStreams[i];
+        for (let i = 0; i < Math.min(finalStreams.length, MAX_STREAMS); i++) {
+            const stream = finalStreams[i];
             const result = stream.originalResult;
-            const torrentSizeMB = (result.Size / (1024 * 1024)).toFixed(2); // Convert bytes to MB for display
+            const torrentSizeMB = (result.Size / (1024 * 1024)).toFixed(2);
+
+            // Construct title for Stremio, including parsed details
+            let titleParts = [result.Title];
+            if (stream.parsedDetails.resolution) titleParts.push(stream.parsedDetails.resolution.toUpperCase());
+            if (stream.parsedDetails.videoQuality) titleParts.push(stream.parsedDetails.videoQuality.toUpperCase());
+            if (stream.parsedDetails.audioQuality) titleParts.push(stream.parsedDetails.audioQuality.toUpperCase());
+            if (stream.parsedDetails.language) titleParts.push(stream.parsedDetails.language.charAt(0).toUpperCase() + stream.parsedDetails.language.slice(1));
+            titleParts.push(`S:${result.Seeders}`, `L:${result.Peers}`, `Size:${torrentSizeMB}MB`);
 
             stremioStreams.push({
-                name: `Jackett | ${result.Tracker}`, // Display the tracker name
-                title: `${result.Title} (S: ${result.Seeders}, L: ${result.Peers}, Size: ${torrentSizeMB}MB)`, // Show seeders/leechers/size in title
+                name: `Jackett | ${result.Tracker}`,
+                title: titleParts.join(' | '),
                 infoHash: stream.infoHash,
                 sources: [`${stream.magnetLink}`],
             });
@@ -482,14 +551,12 @@ builder.defineStreamHandler(async (args) => {
 
         console.log(`[INFO] [STREMIO RESPONSE] Sending ${stremioStreams.length} streams to Stremio for ID: ${args.id}`);
 
-        const endTime = performance.now(); // Mark the end of processing
+        const endTime = performance.now();
         console.log(`[INFO] Total processing time for ${args.id}: ${((endTime - startTime) / 1000).toFixed(2)} seconds.`);
 
-        // Return the streams in the format Stremio expects
         return { streams: stremioStreams };
 
     } catch (error) {
-        // Log any unexpected errors during stream processing and return an empty array
         console.error(`[ERROR] Stream processing failed for ID ${args.id}:`, error.message);
         console.warn(`[WARN] Stream processing for ID ${args.id} failed. Returning empty streams.`);
         return { streams: [] };
@@ -497,16 +564,13 @@ builder.defineStreamHandler(async (args) => {
 });
 
 // --- Initialize and Start the Addon Server ---
-
-// Pre-fetch public trackers when the server starts
 console.log('[INFO] [SERVER STARTUP] Pre-fetching public trackers to warm cache...');
 fetchAndCacheTrackers().then(() => {
     console.log('[INFO] [SERVER STARTUP] Public tracker pre-fetch complete.');
 });
 
-// Set up the HTTP server for the addon using the correct function call and explicitly setting the port
-serveHTTP(builder.getInterface(), { port: 7000 }); // Corrected: Pass { port: 7000 } option
+serveHTTP(builder.getInterface(), { port: 7000 });
 
 console.log('[INFO] Logging Level: info');
 console.log(`[INFO] Response Timeout: ${RESPONSE_TIMEOUT_MS}ms`);
-console.log(`[INFO] Addon is listening on http://127.0.0.1:7000/manifest.json (default port)`); // Stremio default port
+console.log(`[INFO] Addon is listening on http://127.0.0.1:7000/manifest.json (default port)`);
