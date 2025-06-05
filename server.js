@@ -33,7 +33,8 @@ let CURRENT_CONFIG = {
   publicTrackersUrl: process.env.PUBLIC_TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
   logLevel: process.env.LOG_LEVEL || 'info', 
   filterBySeeders: parseInt(process.env.FILTER_BY_SEEDERS || '0', 10), // New: Configurable minimum seeders
-  sortBy: process.env.SORT_BY || 'seeders', // New: Configurable sort order
+  sortBy: process.env.SORT_BY || 'publishAt', // New: Configurable sort order, changed default to publishAt
+  responseTimeout: parseInt(process.env.RESPONSE_TIMEOUT || '20000', 10), // 20 seconds timeout for Stremio to wait
 };
 
 // Jackett Category mappings based on content type - MOVED TO GLOBAL SCOPE
@@ -428,17 +429,24 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
     
     const allSources = [...new Set([...existingSources, ...newTrackers.map(t => `tracker:${t}`), `dht:${infoHash}`])];
 
-    return {
+    const streamObject = {
         // 'name' is often used for the provider or a concise quality label
         name: `Jackett - ${resolution !== 'Unknown' ? resolution : tor.Tracker || 'Unknown'}`, 
-        // 'title' is commonly used for the full torrent title
+        // 'title' is commonly used for the full torrent title (Stremio SDK says deprecated, but useful for compatibility)
         title: tor.Title, 
         // 'description' is the recommended field for detailed stream info
         description: subtitle,
         type: type,
         infoHash: infoHash,
         sources: allSources,
+        // Add behaviorHints for p2p content
+        behaviorHints: {
+            p2p: true // Explicitly mark as P2P content
+        }
     };
+
+    log.debug(`Successfully created stream object for "${tor.Title}":`, JSON.stringify(streamObject));
+    return streamObject;
 };
 
 /**
@@ -641,7 +649,8 @@ app.get('/manifest.json', (req, res) => {
       logLevel = process.env.LOG_LEVEL || CURRENT_CONFIG.logLevel,
       publicTrackersUrl = process.env.PUBLIC_TRACKERS_URL || CURRENT_CONFIG.publicTrackersUrl,
       filterBySeeders, 
-      sortBy 
+      sortBy,
+      responseTimeout
   } = req.query;
 
   // Safely parse values, using CURRENT_CONFIG defaults if query parameter is empty/invalid
@@ -658,6 +667,7 @@ app.get('/manifest.json', (req, res) => {
       publicTrackersUrl: publicTrackersUrl,
       filterBySeeders: parseInt(filterBySeeders, 10) || CURRENT_CONFIG.filterBySeeders,
       sortBy: sortBy || CURRENT_CONFIG.sortBy,
+      responseTimeout: parseInt(responseTimeout, 10) || CURRENT_CONFIG.responseTimeout,
   };
 
   // Initial fetch of trackers with the potentially updated URL
@@ -666,7 +676,7 @@ app.get('/manifest.json', (req, res) => {
 
   res.json({
     id: 'community.stremio.jackettaddon.enhanced', 
-    version: '1.0.7', // Incremented version for these fixes
+    version: '1.0.9', // Incremented version for these fixes
     name: 'Jackett Enhanced Streams',
     description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options. Prioritizes title-based searches for better relevance.',
     resources: ['catalog', 'stream'],
@@ -689,6 +699,7 @@ app.get('/manifest.json', (req, res) => {
     logo: 'https://placehold.co/256x256/007bff/ffffff?text=JE', 
     behaviorHints: {
         configurable: true,
+        p2p: true, // IMPORTANT: Declare that this addon provides P2P content
         configuration: [
             {
                 key: 'jackettHost',
@@ -776,6 +787,16 @@ app.get('/manifest.json', (req, res) => {
                 description: 'e.g., https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
                 required: false,
                 default: CURRENT_CONFIG.publicTrackersUrl
+            },
+            {
+                key: 'responseTimeout',
+                type: 'number',
+                title: 'Response Timeout (ms)',
+                description: 'Max time Stremio waits for a response (e.g., 20000 for 20 seconds)',
+                required: false,
+                default: CURRENT_CONFIG.responseTimeout.toString(),
+                min: 5000, // Minimum reasonable timeout
+                max: 60000 // Maximum reasonable timeout
             },
             {
                 key: 'logLevel',
@@ -970,214 +991,237 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     return res.status(500).json({ error: 'Jackett configuration missing.' });
   }
 
-  let metadata = {};
-  let allJackettResults = [];
-  const category = JACKETT_CATEGORIES[type]; 
-  let wasIdQuery = false; 
-  const JACKETT_STREAM_FETCH_LIMIT = 200; 
+  // Create a promise that resolves if processing completes, or rejects after a timeout
+  const processingPromise = (async () => {
+    let metadata = {};
+    let allJackettResults = [];
+    const category = JACKETT_CATEGORIES[type]; 
+    let wasIdQuery = false; 
+    const JACKETT_STREAM_FETCH_LIMIT = 200; 
 
-  let baseImdbId = id.split(':')[0]; 
-  let season = null;
-  let episode = null;
+    let baseImdbId = id.split(':')[0]; 
+    let season = null;
+    let episode = null;
 
-  if (type === 'series') {
-      const parts = id.split(':');
-      if (parts.length >= 3) {
-          season = parseInt(parts[1], 10);
-          episode = parseInt(parts[2], 10);
-          log.debug(`Detected Season: ${season}, Episode: ${episode}`);
+    if (type === 'series') {
+        const parts = id.split(':');
+        if (parts.length >= 3) {
+            season = parseInt(parts[1], 10);
+            episode = parseInt(parts[2], 10);
+            log.debug(`Detected Season: ${season}, Episode: ${episode}`);
+        }
+    }
+
+
+    if (baseImdbId.startsWith('tt')) { 
+      log.debug(`IMDB ID detected: ${baseImdbId}. Attempting metadata lookup.`);
+      metadata = await fetchMetadataFromOmdbTmdb(baseImdbId, config.omdbApiKey, config.tmdbApiKey);
+      metadata.imdbId = baseImdbId; 
+      wasIdQuery = true; 
+
+      // --- PRIORITIZED JACKETT QUERIES (Revised Strategy) ---
+      let queriesToTry = [];
+      const maxRelevantResultsThreshold = Math.max(config.maxResults, 10); 
+
+      // 1. Primary Title + Year (for both movies and series)
+      if (metadata.title) { // Always include title as a base for query
+          if (metadata.year) {
+              queriesToTry.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
+          }
+          queriesToTry.push({ q: metadata.title, cat: category }); // Title alone
+          if (type === 'series' && season && episode) {
+              queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
+              queriesToTry.push({ q: `${metadata.title} Season ${season} Episode ${episode}`, cat: category });
+          }
       }
-  }
-
-
-  if (baseImdbId.startsWith('tt')) { 
-    log.debug(`IMDB ID detected: ${baseImdbId}. Attempting metadata lookup.`);
-    metadata = await fetchMetadataFromOmdbTmdb(baseImdbId, config.omdbApiKey, config.tmdbApiKey);
-    metadata.imdbId = baseImdbId; 
-    wasIdQuery = true; 
-
-    // --- PRIORITIZED JACKETT QUERIES (Revised Strategy) ---
-    let queriesToTry = [];
-    const maxRelevantResultsThreshold = Math.max(config.maxResults, 10); 
-
-    // 1. Primary Title + Year (for both movies and series)
-    if (metadata.title) { // Always include title as a base for query
-        if (metadata.year) {
-            queriesToTry.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
-        }
-        // FIX: Changed 'queriesTo' to 'queriesToTry'
-        queriesToTry.push({ q: metadata.title, cat: category }); // Title alone
-        if (type === 'series' && season && episode) {
-            queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
-            queriesToTry.push({ q: `${metadata.title} Season ${season} Episode ${episode}`, cat: category });
-        }
-    }
-    
-    // 2. Alternative Titles + Year (if any)
-    if (metadata.akaTitles && metadata.akaTitles.length > 0) {
-        metadata.akaTitles.forEach(akaTitle => {
-            if (akaTitle) { // Ensure akaTitle is not null/empty
-                if (metadata.year) {
-                    queriesToTry.push({ q: `${akaTitle} ${metadata.year}`, cat: category });
-                }
-                queriesToTry.push({ q: akaTitle, cat: category }); // AKA title alone
-                if (type === 'series' && season && episode) {
-                    queriesToTry.push({ q: `${akaTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
-                }
-            }
-        });
-    }
-    
-    // 3. Fallback to direct IMDB/TMDB ID search if initial title-based queries are not enough
-    // These should only be added if we don't have enough results from title-based queries
-    const currentRelevantCount = allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length;
-    if (currentRelevantCount < maxRelevantResultsThreshold) {
-        if (metadata.imdbId) {
-            queriesToTry.push({ imdbid: metadata.imdbId, cat: category });
-            if (type === 'series' && season && episode) {
-                queriesToTry.push({ imdbid: metadata.imdbId, cat: category, season: season, ep: episode });
-            }
-        }
-        if (metadata.tmdbId) {
-            queriesToTry.push({ tmdbid: metadata.tmdbId, cat: category });
-            if (type === 'series' && season && episode) {
-                queriesToTry.push({ tmdbid: metadata.tmdbId, cat: category, season: season, ep: episode });
-            }
-        }
-    }
-
-    // Deduplicate query objects to avoid redundant API calls
-    const uniqueQueries = [];
-    const seenQueryStrings = new Set();
-    for (const query of queriesToTry) {
-        const queryString = JSON.stringify(query); 
-        if (!seenQueryStrings.has(queryString)) {
-            uniqueQueries.push(query);
-            seenQueryStrings.add(queryString);
-        }
-    }
-
-    // Execute queries in a prioritized manner
-    for (const queryParams of uniqueQueries) {
-        try {
-            // Check if we already have enough raw results, or enough relevant results
-            if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT &&
-                allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length >= maxRelevantResultsThreshold) {
-                log.debug(`Stopping queries. Enough raw results or relevant results already found.`);
-                break; 
-            }
-
-            const jackettResponse = await fetchJackettResults(queryParams, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-            if (jackettResponse && jackettResponse.Results) {
-                allJackettResults = allJackettResults.concat(jackettResponse.Results);
-            }
-        } catch (error) {
-            log.warn(`Failed to fetch Jackett results for query ${JSON.stringify(queryParams)}: ${error.message}`);
-        }
-    }
-
-    // Final check/fallback: Original Stremio ID as a raw query if nothing else worked
-    // This is a very broad fallback, only used if precise queries failed completely.
-    if (allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length < maxRelevantResultsThreshold &&
-        id && id.trim() !== '' && !id.startsWith('jackett:')) { 
-        log.warn(`Still not enough relevant results. Final fallback: using original Stremio ID "${id}" as general query.`);
-        try {
-            const params = { q: id, cat: category };
-            if (type === 'series' && season && episode) {
-                params.season = season;
-                params.ep = episode;
-            }
-            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-            if (jackettResponse && jackettResponse.Results) {
-                allJackettResults = allJackettResults.concat(jackettResponse.Results);
-            }
-        } catch (error) {
-            log.warn(`Error during final fallback using raw Stremio ID as query: ${error.message}`);
-        }
-    }
-
-  } else if (id.startsWith('jackett:')) {
-    const originalTitle = decodeURIComponent(id.substring('jackett:'.length).split('-').slice(0, -1).join(' '));
-    log.debug(`Custom Jackett ID detected. Searching by original title: "${originalTitle}"`);
-    const jackettResponse = await fetchJackettResults({ q: originalTitle, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-    allJackettResults = jackettResponse?.Results || [];
-    metadata = { title: originalTitle }; 
-    wasIdQuery = false;
-  } else {
-    log.warn(`Non-IMDB/Jackett custom ID received: ${id}. Using ID directly as search query.`);
-    const jackettResponse = await fetchJackettResults({ q: id, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-    allJackettResults = jackettResponse?.Results || [];
-    metadata = { title: id }; 
-    wasIdQuery = false;
-  }
-
-  // Deduplicate all results again after merging from multiple queries
-  const finalSeenGuids = new Set();
-  allJackettResults = allJackettResults.filter(item => {
-      const uniqueIdentifier = item.guid || item.MagnetUri; 
-      if (finalSeenGuids.has(uniqueIdentifier)) { 
-          return false;
+      
+      // 2. Alternative Titles + Year (if any)
+      if (metadata.akaTitles && metadata.akaTitles.length > 0) {
+          metadata.akaTitles.forEach(akaTitle => {
+              if (akaTitle) { // Ensure akaTitle is not null/empty
+                  if (metadata.year) {
+                      queriesToTry.push({ q: `${akaTitle} ${metadata.year}`, cat: category });
+                  }
+                  queriesToTry.push({ q: akaTitle, cat: category }); // AKA title alone
+                  if (type === 'series' && season && episode) {
+                      queriesToTry.push({ q: `${akaTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
+                  }
+              }
+          });
       }
-      finalSeenGuids.add(uniqueIdentifier);
-      return true;
-  });
+      
+      // 3. Fallback to direct IMDB/TMDB ID search if initial title-based queries are not enough
+      // These should only be added if we don't have enough results from title-based queries
+      const currentRelevantCount = allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length;
+      if (currentRelevantCount < maxRelevantResultsThreshold) {
+          if (metadata.imdbId) {
+              queriesToTry.push({ imdbid: metadata.imdbId, cat: category });
+              if (type === 'series' && season && episode) {
+                  queriesToTry.push({ imdbid: metadata.imdbId, cat: category, season: season, ep: episode });
+              }
+          }
+          if (metadata.tmdbId) {
+              queriesToTry.push({ tmdbid: metadata.tmdbId, cat: category });
+              if (type === 'series' && season && episode) {
+                  queriesToTry.push({ tmdbid: metadata.tmdbId, cat: category, season: season, ep: episode });
+              }
+          }
+      }
 
+      // Deduplicate query objects to avoid redundant API calls
+      const uniqueQueries = [];
+      const seenQueryStrings = new Set();
+      for (const query of queriesToTry) {
+          const queryString = JSON.stringify(query); 
+          if (!seenQueryStrings.has(queryString)) {
+              uniqueQueries.push(query);
+              seenQueryStrings.add(queryString);
+          }
+      }
 
-  let streams = [];
-  if (allJackettResults.length > 0) {
-    // Filter results for quality and preferences
-    const validatedResults = allJackettResults.filter(item => 
-      validateJackettResult(item, metadata, wasIdQuery, config)
-    );
+      // Execute queries in a prioritized manner
+      for (const queryParams of uniqueQueries) {
+          try {
+              // Check if we already have enough raw results, or enough relevant results
+              if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT &&
+                  allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length >= maxRelevantResultsThreshold) {
+                  log.debug(`Stopping queries. Enough raw results or relevant results already found.`);
+                  break; 
+              }
 
-    // Filter by minimum seeders from config
-    const filteredBySeeders = validatedResults.filter(item => item.Seeders >= config.filterBySeeders);
-    log.info(`Filtered down to ${filteredBySeeders.length} results after min seeders (${config.filterBySeeders})`);
+              const jackettResponse = await fetchJackettResults(queryParams, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+              if (jackettResponse && jackettResponse.Results) {
+                  allJackettResults = allJackettResults.concat(jackettResponse.Results);
+              }
+          } catch (error) {
+              log.warn(`Failed to fetch Jackett results for query ${JSON.stringify(queryParams)}: ${error.message}`);
+          }
+      }
 
-    const resultsWithScore = filteredBySeeders.map(item => ({
-        item,
-        score: calculateMatchScore(item, metadata), 
-        resolution: extractResolution(item.Title) || 'Unknown',
-        language: extractLanguage(item.Title) || 'Unknown',
-        originalSeeders: item.Seeders || 0,
-        originalSize: item.Size || 0,
-        publishDate: new Date(item.PublishDate || 0)
-    }));
+      // Final check/fallback: Original Stremio ID as a raw query if nothing else worked
+      // This is a very broad fallback, only used if precise queries failed completely.
+      if (allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length < maxRelevantResultsThreshold &&
+          id && id.trim() !== '' && !id.startsWith('jackett:')) { 
+          log.warn(`Still not enough relevant results. Final fallback: using original Stremio ID "${id}" as general query.`);
+          try {
+              const params = { q: id, cat: category };
+              if (type === 'series' && season && episode) {
+                  params.season = season;
+                  params.ep = episode;
+              }
+              const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+              if (jackettResponse && jackettResponse.Results) {
+                  allJackettResults = allJackettResults.concat(jackettResponse.Results);
+              }
+          } catch (error) {
+              log.warn(`Error during final fallback using raw Stremio ID as query: ${error.message}`);
+          }
+      }
 
-    // Sort based on user's sortBy preference
-    const sortedAndScoredResults = resultsWithScore.sort((a, b) => {
-        if (config.sortBy === 'score') {
-            if (b.score !== a.score) return b.score - a.score;
-        }
-        if (config.sortBy === 'seeders') {
-            if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
-        }
-        if (config.sortBy === 'publishAt') {
-            if (b.publishDate.getTime() !== a.publishDate.getTime()) return b.publishDate.getTime() - a.publishDate.getTime();
-        }
-        // Fallback for ties or if sortBy isn't one of the main options
-        if (b.score !== a.score) return b.score - a.score;
-        if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
-        return b.publishDate.getTime() - a.publishDate.getTime();
-    })
-    .slice(0, config.maxResults); // Apply user's maxResults after full sorting and filtering
-
-    // Fetch trackers once for all streams
-    // This explicit call here is important to ensure trackers are available
-    // for magnet enrichment right before stream creation.
-    const currentTrackers = await fetchAndCachePublicTrackers(config.publicTrackersUrl);
-
-    for (const link of sortedAndScoredResults) {
-        const stremioStream = createStremioStream(link.item, type, link.item.MagnetUri, currentTrackers);
-        if (stremioStream) {
-            streams.push(stremioStream);
-        }
+    } else if (id.startsWith('jackett:')) {
+      const originalTitle = decodeURIComponent(id.substring('jackett:'.length).split('-').slice(0, -1).join(' '));
+      log.debug(`Custom Jackett ID detected. Searching by original title: "${originalTitle}"`);
+      const jackettResponse = await fetchJackettResults({ q: originalTitle, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+      allJackettResults = jackettResponse?.Results || [];
+      metadata = { title: originalTitle }; 
+      wasIdQuery = false;
+    } else {
+      log.warn(`Non-IMDB/Jackett custom ID received: ${id}. Using ID directly as search query.`);
+      const jackettResponse = await fetchJackettResults({ q: id, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+      allJackettResults = jackettResponse?.Results || [];
+      metadata = { title: id }; 
+      wasIdQuery = false;
     }
-  }
 
-  log.info(`[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio for ID: ${id}`);
-  log.debug(`[STREMIO RESPONSE] Full streams array for ID ${id}:`, JSON.stringify(streams, null, 2));
-  res.json({ streams: streams });
+    // Deduplicate all results again after merging from multiple queries
+    const finalSeenGuids = new Set();
+    allJackettResults = allJackettResults.filter(item => {
+        const uniqueIdentifier = item.guid || item.MagnetUri; 
+        if (finalSeenGuids.has(uniqueIdentifier)) { 
+            return false;
+        }
+        finalSeenGuids.add(uniqueIdentifier);
+        return true;
+    });
+
+
+    let streams = [];
+    if (allJackettResults.length > 0) {
+      // Filter results for quality and preferences
+      const validatedResults = allJackettResults.filter(item => 
+        validateJackettResult(item, metadata, wasIdQuery, config)
+      );
+
+      // Filter by minimum seeders from config
+      const filteredBySeeders = validatedResults.filter(item => item.Seeders >= config.filterBySeeders);
+      log.info(`Filtered down to ${filteredBySeeders.length} results after min seeders (${config.filterBySeeders})`);
+
+      const resultsWithScore = filteredBySeeders.map(item => ({
+          item,
+          score: calculateMatchScore(item, metadata), 
+          resolution: extractResolution(item.Title) || 'Unknown',
+          language: extractLanguage(item.Title) || 'Unknown',
+          originalSeeders: item.Seeders || 0,
+          originalSize: item.Size || 0,
+          publishDate: new Date(item.PublishDate || 0)
+      }));
+
+      // Sort results based on user's sortBy preference, with publishDate as primary sort
+      const sortedAndScoredResults = resultsWithScore.sort((a, b) => {
+          // Primary sort: latest publishAt (descending)
+          const publishDateComparison = b.publishDate.getTime() - a.publishDate.getTime();
+          if (publishDateComparison !== 0) {
+              return publishDateComparison;
+          }
+
+          // Secondary sort based on user's 'sortBy' preference (if publishDate is tied)
+          if (config.sortBy === 'score') {
+              if (b.score !== a.score) return b.score - a.score;
+          }
+          if (config.sortBy === 'seeders') {
+              if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
+          }
+          // If config.sortBy was 'publishAt' and they are equal (already handled by primary sort), or no other preference
+          // Fallback for ties: by score, then by seeders (descending)
+          if (b.score !== a.score) return b.score - a.score;
+          if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
+          return 0; // If all are equal, order doesn't matter
+      })
+      .slice(0, config.maxResults); // Apply user's maxResults after full sorting and filtering
+
+      // Fetch trackers once for all streams
+      // This explicit call here is important to ensure trackers are available
+      // for magnet enrichment right before stream creation.
+      const currentTrackers = await fetchAndCachePublicTrackers(config.publicTrackersUrl);
+
+      for (const link of sortedAndScoredResults) {
+          const stremioStream = createStremioStream(link.item, type, link.item.MagnetUri, currentTrackers);
+          if (stremioStream) {
+              streams.push(stremioStream);
+          }
+      }
+    }
+    return { streams: streams };
+  })();
+
+  // Implement a timeout to ensure Stremio receives a response
+  const timeoutPromise = new Promise(resolve => 
+    setTimeout(() => {
+      log.warn(`Stream processing for ID ${id} timed out after ${config.responseTimeout}ms. Returning empty streams.`);
+      resolve({ streams: [] });
+    }, config.responseTimeout)
+  );
+
+  // Race the processing against the timeout
+  try {
+    const finalResponse = await Promise.race([processingPromise, timeoutPromise]);
+    log.info(`[STREMIO RESPONSE] Sending ${finalResponse.streams.length} streams to Stremio for ID: ${id}`);
+    log.debug(`[STREMIO RESPONSE] Full streams array for ID ${id}:`, JSON.stringify(finalResponse.streams, null, 2));
+    res.json(finalResponse);
+  } catch (error) {
+    log.error('Error in stream endpoint after race:', error);
+    res.status(500).json({ error: 'Failed to retrieve streams.' });
+  }
 });
 
 // Basic health check endpoint
@@ -1195,6 +1239,8 @@ app.listen(PORT, async () => { // Made the listen callback async
   log.info(`TMDB API Key: ${CURRENT_CONFIG.tmdbApiKey === 'YOUR_TMDB_API_KEY' ? 'YOUR_TMDB_API_KEY' : CURRENT_CONFIG.tmdbApiKey.substring(0, Math.min(CURRENT_CONFIG.tmdbApiKey.length, 5)) + '...'}`);
   log.info(`Public Trackers URL: ${CURRENT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${CURRENT_CONFIG.logLevel}`);
+  log.info(`Response Timeout: ${CURRENT_CONFIG.responseTimeout}ms`);
+
 
   // Force an initial fetch of trackers on server startup
   // This helps pre-warm the cache before any Stremio requests come in.
@@ -1202,3 +1248,5 @@ app.listen(PORT, async () => { // Made the listen callback async
   await fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
   log.info('[SERVER STARTUP] Public tracker pre-fetch complete.');
 });
+
+
