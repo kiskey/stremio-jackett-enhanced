@@ -1,110 +1,116 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stremio Jackett Addon Configuration</title>
+    <title>Jackett Stremio Addon Configuration</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; }
+        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; color: #333; margin: 0; padding: 0; }
+        .container { max-width: 900px; margin: 2rem auto; padding: 1.5rem; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); }
+        .section { margin-bottom: 2rem; padding: 1.5rem; border-radius: 10px; background-color: #f9fafb; border: 1px solid #e5e7eb; }
+        .label { font-weight: bold; margin-bottom: 0.5rem; display: block; color: #1f2937; }
+        .value { margin-bottom: 1rem; color: #4b5563; }
+        .config-block { background-color: #edf2f7; padding: 1.2rem; border-radius: 8px; margin-top: 1rem; word-wrap: break-word; font-family: monospace; font-size: 0.9em; line-height: 1.4; }
+        .error { color: #dc2626; font-weight: bold; background-color: #fee2e2; border: 1px solid #fca5a5; padding: 0.75rem; border-radius: 8px; margin-top: 1rem; }
+        .hidden { display: none; }
+        h1 { color: #1a202c; }
+        h2 { color: #2d3748; }
+        code { background-color: #e2e8f0; padding: 0.2em 0.4em; border-radius: 4px; font-weight: 600; }
+        pre { background-color: #2d3748; color: #e2e8f0; padding: 1.5rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+        ul { list-style: none; padding: 0; margin: 0; }
+        li { margin-bottom: 0.5rem; }
+        li strong { color: #2c5282; } /* Darker blue for strong labels */
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .container { margin: 1rem; padding: 1rem; }
+            .section { padding: 1rem; }
+        }
     </style>
 </head>
-<body class="bg-gray-900 text-gray-100 min-h-screen flex flex-col items-center p-6">
-    <div class="max-w-3xl w-full bg-gray-800 p-8 rounded-xl shadow-lg">
-        <h1 class="text-4xl font-bold text-blue-400 mb-6 text-center">Stremio Jackett Addon Configuration</h1>
-        <p class="text-gray-300 mb-6 text-center">
-            This page displays the current configuration of your Stremio Jackett Addon.
-            To change these settings, you need to set the corresponding environment variables
-            when running the Docker container or deploying the application.
-        </p>
+<body>
+    <div class="container rounded-lg shadow-xl">
+        <h1 class="text-4xl font-extrabold mb-6 text-center">Jackett Stremio Addon Configuration</h1>
 
-        <h2 class="text-2xl font-semibold text-white mb-4">Current Configuration:</h2>
-        <div id="config-display" class="bg-gray-700 p-4 rounded-lg mb-6 text-sm sm:text-base">
-            <p>Loading configuration...</p>
+        <div class="section">
+            <h2 class="text-2xl font-bold mb-4">Current Configuration:</h2>
+            <div id="current-config" class="config-block">
+                Loading configuration...
+            </div>
+            <p id="error-message" class="error hidden">Error loading configuration. Please check your Node.js server console for more details.</p>
         </div>
 
-        <h2 class="text-2xl font-semibold text-white mb-4">How to Configure:</h2>
-        <p class="text-gray-300 mb-4">
-            The addon reads its configuration from environment variables.
-            Below are the variables you can set:
-        </p>
-        <ul class="list-disc list-inside text-gray-300 space-y-2 mb-6">
-            <li><code>JACKETT_URL</code>: Your Jackett instance URL (e.g., <code>http://localhost:9117</code>)</li>
-            <li><code>JACKETT_API_KEY</code>: Your Jackett API Key</li>
-            <li><code>OMDB_API_KEY</code>: Your OMDb API Key (for movie/series metadata lookup)</li>
-            <li><code>TMDB_API_KEY</code>: Your TMDB API Key (for movie/series metadata lookup, including alternative titles)</li>
-            <li><code>PREFERRED_RESOLUTIONS</code>: Comma-separated list of resolutions (e.g., <code>2160p,1080p,720p</code>). Order matters for sorting preference.</li>
-            <li><code>PREFERRED_LANGUAGES</code>: Comma-separated list of languages (e.g., <code>English,Hindi,Tamil</code>). Order matters for sorting preference.</li>
-            <li><code>MAX_RESULTS</code>: Maximum number of results to return (e.g., <code>50</code>)</li>
-            <li><code>MAX_SIZE</code>: Maximum torrent size in bytes (e.g., <code>5368709120</code> for 5GB). Set to <code>0</code> for no restriction.</li>
-            <li><code>LOG_LEVEL</code>: Set the logging verbosity (<code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>, <code>silent</code>).</li>
-            <li><code>PUBLIC_TRACKERS_URL</code>: URL to a plain text file containing public tracker URLs (one per line). Default is a popular public list.</li>
-        </ul>
+        <div class="section">
+            <h2 class="text-2xl font-bold mb-4">How to Configure:</h2>
+            <div class="config-block">
+                <p class="mb-2">The addon primarily reads its configuration from <strong>environment variables</strong>. Set these variables where your Node.js server is hosted (e.g., in a `.env` file for local development, or in your deployment environment settings).</p>
+                <p class="mb-4">Alternatively, you can configure these directly in Stremio's addon installation dialog, which will pass them as URL query parameters to the manifest endpoint.</p>
+                <h3 class="text-xl font-semibold mt-6 mb-2">Environment Variables:</h3>
+                <pre class="rounded-lg shadow-inner">
+JACKETT_URL=http://localhost:9117
+JACKETT_API_KEY=YOUR_JACKETT_API_KEY
+OMDB_API_KEY=YOUR_OMDB_API_KEY
+TMDB_API_KEY=YOUR_TMDB_API_KEY
+PREFERRED_RESOLUTIONS=2160p,1080p,720p
+PREFERRED_LANGUAGES=English,Hindi,Tamil
+MAX_RESULTS=50
+MAX_SIZE=0
+LOG_LEVEL=info
+PUBLIC_TRACKERS_URL=https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt
+FILTER_BY_SEEDERS=0
+SORT_BY=seeders
+                </pre>
+                <p class="text-sm text-gray-600 mt-2">Note: `MAX_SIZE` is in bytes (e.g., 5368709120 for 5GB). Set to `0` for no restriction.</p>
+            </div>
+        </div>
 
-        <h3 class="text-xl font-semibold text-white mt-6 mb-3">Example Docker Run Command:</h3>
-        <pre class="bg-gray-700 p-4 rounded-lg text-green-300 text-sm overflow-x-auto whitespace-pre-wrap break-words">
-            <code>
-docker run -p 7000:7000 \
-  -e JACKETT_URL="http://your-jackett-instance:9117" \
-  -e JACKETT_API_KEY="YOUR_API_KEY_HERE" \
-  -e OMDB_API_KEY="YOUR_OMDB_API_KEY_HERE" \
-  -e TMDB_API_KEY="YOUR_TMDB_API_KEY_HERE" \
-  -e PREFERRED_RESOLUTIONS="2160p,1080p" \
-  -e PREFERRED_LANGUAGES="English,Tamil" \
-  -e MAX_RESULTS="75" \
-  -e MAX_SIZE="5368709120" \
-  -e LOG_LEVEL="debug" \
-  -e PUBLIC_TRACKERS_URL="https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt" \
-  stremio-jackett-addon-nodejs
-            </code>
-        </pre>
-
-        <h3 class="text-xl font-semibold text-white mt-6 mb-3">Addon Manifest URL:</h3>
-        <p class="text-gray-300">
-            Add this URL to Stremio: <code id="manifest-url" class="text-blue-400"></code>
-        </p>
+        <div class="section">
+            <h2 class="text-2xl font-bold mb-4">Addon Installation:</h2>
+            <p class="mb-2">To install this addon in Stremio, copy the URL of your deployed addon and paste it into the addon search bar in Stremio (in the Addons section, scroll to the bottom).</p>
+            <p class="mb-2">Example URL (replace <code class="text-blue-700">YOUR_ADDON_HOST</code> with your actual host and port):</p>
+            <div class="config-block">
+                <code id="manifest-url" class="block bg-gray-200 p-2 rounded break-all text-sm font-semibold">http://YOUR_ADDON_HOST:7000/manifest.json</code>
+            </div>
+            <p class="text-sm text-gray-600 mt-2">Make sure your Node.js server is running and accessible from where you're running Stremio.</p>
+        </div>
     </div>
 
     <script>
         document.addEventListener('DOMContentLoaded', async () => {
-            const configDisplay = document.getElementById('config-display');
+            const configDisplay = document.getElementById('current-config');
+            const errorMessage = document.getElementById('error-message');
             const manifestUrlElement = document.getElementById('manifest-url');
 
+            // Dynamically set the manifest URL based on the current host and port
+            const currentHost = window.location.hostname;
+            const currentPort = window.location.port || '7000'; // Default to 7000 if not specified
+            manifestUrlElement.textContent = `http://${currentHost}:${currentPort}/manifest.json`;
+
             try {
-                // Fetch configuration from the /config API endpoint
                 const response = await fetch('/config');
                 if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                    throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`);
                 }
                 const config = await response.json();
-
-                let configHtml = '';
+                
+                let html = '<ul class="list-disc list-inside space-y-1">'; // Tailwind list styling
                 for (const key in config) {
-                    let value = config[key];
-                    if (Array.isArray(value)) {
-                        value = value.join(', ');
-                    } else if (key === 'maxSize' && value !== 0) {
-                        // Convert bytes to human-readable format for display
-                        const formatBytes = (bytes) => {
-                            if (bytes === 0) return '0 Bytes';
-                            const k = 1024;
-                            const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
-                            const i = Math.floor(Math.log(bytes) / Math.log(k));
-                            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-                        };
-                        value = formatBytes(value);
+                    // Display API keys as hidden unless they are default placeholders
+                    if (key.includes('ApiKey') && config[key] !== 'YOUR_JACKETT_API_KEY' && config[key] !== 'YOUR_OMDB_API_KEY' && config[key] !== 'YOUR_TMDB_API_KEY') {
+                        html += `<li><strong>${key}:</strong> <span class="text-gray-500">******** (hidden)</span></li>`;
+                    } else if (Array.isArray(config[key])) {
+                        html += `<li><strong>${key}:</strong> ${config[key].join(', ')}</li>`;
+                    } else {
+                        html += `<li><strong>${key}:</strong> ${config[key]}</li>`;
                     }
-                    configHtml += `<p><strong>${key}:</strong> ${value}</p>`;
                 }
-                configDisplay.innerHTML = configHtml;
-
-                // Display the manifest URL dynamically
-                const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-                manifestUrlElement.textContent = `${window.location.protocol}//${window.location.hostname}:${port}/manifest.json`;
+                html += '</ul>';
+                configDisplay.innerHTML = html;
+                errorMessage.classList.add('hidden'); 
 
             } catch (error) {
-                console.error('Failed to load configuration:', error);
-                configDisplay.innerHTML = '<p class="text-red-400">Error loading configuration. Check server logs.</p>';
+                console.error('Failed to fetch configuration:', error);
+                configDisplay.innerHTML = 'Error loading configuration. Check your Node.js server console for more details.';
+                errorMessage.classList.remove('hidden'); 
             }
         });
     </script>
