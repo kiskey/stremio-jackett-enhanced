@@ -317,7 +317,7 @@ builder.defineStreamHandler(async (args) => {
             if (stream.parsedDetails.language) titleParts.push(stream.parsedDetails.language.charAt(0).toUpperCase() + stream.parsedDetails.language.slice(1));
             titleParts.push(`S:${result.Seeders}`, `L:${result.Peers}`, `Size:${torrentSizeMB}MB`);
 
-            // Construct sources array with individual trackers and DHT node
+            // Construct sources array with individual trackers and DHT node, without the full magnet link
             const streamSources = publicTrackers.map(trackerUrl => `tracker:${trackerUrl}`);
             streamSources.push(`dht:${stream.infoHash}`);
 
@@ -325,8 +325,11 @@ builder.defineStreamHandler(async (args) => {
                 name: `Jackett | ${result.Tracker}`,
                 title: titleParts.join(' | '),
                 infoHash: stream.infoHash,
-                // Pass the original magnet link as the primary source
-                sources: [`${stream.magnetLink}`].concat(streamSources), // Concatenate magnet link with explicit trackers/dht
+                // Only include individual tracker URLs and DHT node in sources, not the full magnet link
+                sources: streamSources,
+                // The full magnet link can optionally be added as a separate property if Stremio uses it,
+                // but infoHash + sources is the standard for torrent discovery.
+                // magnetURI: stream.magnetLink // This line is commented out as it's not a standard Stream Object property.
             });
         }
 
