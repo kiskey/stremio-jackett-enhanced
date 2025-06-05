@@ -1,33 +1,23 @@
-# Use an official Node.js runtime as a parent image
+# Use a lean Node.js base image
 FROM node:20-alpine
 
 # Set the working directory in the container
 WORKDIR /app
 
-# Install app dependencies
-# A wildcard is used to ensure both package.json and package-lock.json are copied
+# Copy package.json and package-lock.json to leverage Docker cache
+# This step is done separately to ensure dependencies are re-installed only when package.json changes
 COPY package*.json ./
 
 # Install dependencies
-RUN npm install
+RUN npm install --production
 
-# Copy app source code to the working directory
+# Copy the rest of the application code
+# The 'public' directory contains index.html for configuration
 COPY . .
 
-# Expose the port the app runs on
+# Expose the port the addon listens on (default Stremio addon port)
 EXPOSE 7000
 
-# Define environment variables for configuration (can be overridden at runtime)
-ENV JACKETT_URL="http://localhost:9117"
-ENV JACKETT_API_KEY="YOUR_JACKETT_API_KEY"
-ENV OMDB_API_KEY="YOUR_OMDB_API_KEY"
-ENV TMDB_API_KEY="YOUR_TMDB_API_KEY"
-ENV PREFERRED_RESOLUTIONS="2160p,1080p,720p"
-ENV PREFERRED_LANGUAGES="Tamil,Hindi,Malayalam,Telugu,English,Japanese,Korean,Chinese"
-ENV MAX_RESULTS="50"
-ENV MAX_SIZE="0"
-ENV LOG_LEVEL="info"
-ENV PUBLIC_TRACKERS_URL="https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt"
-
-# Run the application
-CMD ["node", "server.js"]
+# Command to run the application
+# Use 'npm start' as defined in package.json
+CMD ["npm", "start"]
