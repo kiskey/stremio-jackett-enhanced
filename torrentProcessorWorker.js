@@ -22,27 +22,26 @@ let MAX_TORRENT_SIZE_MB;
 let PREFERRED_LANGUAGES;
 let PREFERRED_VIDEO_QUALITIES_CONFIG;
 let PREFERRED_AUDIO_QUALITIES_CONFIG;
+let INITIAL_DATE_FILTER_LIMIT; // New config: limit for initial date-based filtering
 
 // --- Utility Functions for Validation, Parsing, and Filtering ---
 
 /**
  * Sanitizes and standardizes a title for robust comparison.
  * Converts to lowercase, removes special characters, replaces separators, and normalizes common tags.
- * Also attempts to extract a year from the title.
+ * Also attempts to extract a year from the title (for validation purposes, not for pubDate).
  * @param {string} title - The title string to standardize.
  * @returns {{standardizedTitle: string, extractedYear: number|null}} - The standardized title and any extracted year.
  */
 function standardizeTitle(title) {
     let extractedYear = null;
 
-    // Try to extract year first, as it might be in brackets/parentheses
+    // Try to extract year first, as it might be in brackets/parentheses for validation
     const yearMatch = title.match(/[\(\[](\d{4})[\)\]]/);
     if (yearMatch) {
         extractedYear = parseInt(yearMatch[1], 10);
-        // Remove the year part for further standardization
         title = title.replace(yearMatch[0], '').trim();
     } else {
-        // Try simple 4-digit year at the end
         const simpleYearMatch = title.match(/\s(\d{4})$/);
         if (simpleYearMatch) {
             extractedYear = parseInt(simpleYearMatch[1], 10);
@@ -50,26 +49,16 @@ function standardizeTitle(title) {
         }
     }
 
-    // Convert to lowercase
     let standardized = title.toLowerCase();
-
-    // Remove common special characters, punctuation, and symbols more comprehensively
-    standardized = standardized.replace(/[^\w\s]/g, ' '); // Keep only alphanumeric and spaces
-
-    // Replace common separators with a single space and trim
+    standardized = standardized.replace(/[^\w\s]/g, ' ');
     standardized = standardized.replace(/[\s\.\-]+/g, ' ').trim();
-
-    // Remove common release group tags, quality tags, and other extraneous info
-    // This regex is extended based on observed patterns in torrent titles
     standardized = standardized.
         replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|generalfilm|nahom|edge2020|xvi|mp3|eac3|subs)\b/g, ' ');
     
-    // Remove year if it's still present and surrounded by spaces
     if (extractedYear) {
         standardized = standardized.replace(new RegExp(`\\s${extractedYear}\\s`, 'g'), ' ');
     }
 
-    // Final clean up: replace multiple spaces with a single space and trim
     standardized = standardized.replace(/\s+/g, ' ').trim();
 
     return { standardizedTitle: standardized, extractedYear: extractedYear };
@@ -248,11 +237,25 @@ parentPort.on('message', (message) => {
         PREFERRED_LANGUAGES = config.PREFERRED_LANGUAGES;
         PREFERRED_VIDEO_QUALITIES_CONFIG = config.PREFERRED_VIDEO_QUALITIES_CONFIG;
         PREFERRED_AUDIO_QUALITIES_CONFIG = config.PREFERRED_AUDIO_QUALITIES_CONFIG;
+        INITIAL_DATE_FILTER_LIMIT = config.INITIAL_DATE_FILTER_LIMIT; // Get the new config
 
         const processedStreams = [];
-        const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
+        const processedInfoHashes = new Set();
 
-        for (const result of jackettResults) {
+        // --- Stage 1: Initial Filter by PublishedDate (Recency) ---
+        // Sort raw Jackett results by PublishedDate descending first to get the latest
+        // Invalid dates will be treated as older (pushed to the end of this initial sort)
+        const sortedByDateResults = jackettResults.sort((a, b) => {
+            const dateA = a.PublishedDate && !isNaN(new Date(a.PublishedDate).getTime()) ? new Date(a.PublishedDate).getTime() : 0; // 0 for invalid/missing dates
+            const dateB = b.PublishedDate && !isNaN(new Date(b.PublishedDate).getTime()) ? new Date(b.PublishedDate).getTime() : 0;
+            return dateB - dateA; // Descending order (latest first)
+        });
+
+        // Take only the top N latest results for further, more intensive processing
+        const limitedResults = sortedByDateResults.slice(0, INITIAL_DATE_FILTER_LIMIT);
+        console.log(`[WORKER] After initial date sort and limit (${INITIAL_DATE_FILTER_LIMIT}), ${limitedResults.length} results remain for detailed processing.`);
+
+        for (const result of limitedResults) {
             try { // Individual try-catch for each result to prevent worker crash
                 const lowerTitle = result.Title ? result.Title.toLowerCase() : '';
 
@@ -271,21 +274,33 @@ parentPort.on('message', (message) => {
                 if (processedInfoHashes.has(infoHash)) continue;
 
                 // --- Validate Torrent Title vs. Expected Metadata ---
-                if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue; // Ensure Title is a string
+                if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue;
 
-                // --- Prioritize Torznab API fields, fallback to title parsing ---
+                // --- Prioritize Torznab API fields, fallback to title parsing ONLY IF NOT AVAILABLE ---
                 let torrentResolution = simpleGet(result, 'Resolution', null);
                 let torrentVideoQuality = simpleGet(result, 'Quality', null); // Jackett's 'Quality' field
                 let torrentAudioQuality = simpleGet(result, 'AudioChannels', null); // Jackett's 'AudioChannels' or similar
                 let torrentLanguage = simpleGet(result, 'Language', null); // Jackett's 'Language' field
 
-                // If fields are not directly available from API, parse from title as fallback
+                // Fallback to title parsing only if Torznab API fields are explicitly null/undefined/empty
                 const parsedDetailsFromTitle = parseTorrentDetails(result.Title || '');
 
-                if (!torrentResolution) torrentResolution = parsedDetailsFromTitle.resolution;
-                if (!torrentVideoQuality) torrentVideoQuality = parsedDetailsFromTitle.videoQuality;
-                if (!torrentAudioQuality) torrentAudioQuality = parsedDetailsFromTitle.audioQuality;
-                if (!torrentLanguage) torrentLanguage = parsedDetailsFromTitle.language;
+                if (!torrentResolution) {
+                     torrentResolution = parsedDetailsFromTitle.resolution;
+                     if(torrentResolution) console.log(`[WORKER] Fallback: Found resolution from title for "${result.Title}": ${torrentResolution}`);
+                }
+                if (!torrentVideoQuality) {
+                     torrentVideoQuality = parsedDetailsFromTitle.videoQuality;
+                     if(torrentVideoQuality) console.log(`[WORKER] Fallback: Found video quality from title for "${result.Title}": ${torrentVideoQuality}`);
+                }
+                if (!torrentAudioQuality) {
+                     torrentAudioQuality = parsedDetailsFromTitle.audioQuality;
+                     if(torrentAudioQuality) console.log(`[WORKER] Fallback: Found audio quality from title for "${result.Title}": ${torrentAudioQuality}`);
+                }
+                if (!torrentLanguage) {
+                     torrentLanguage = parsedDetailsFromTitle.language;
+                     if(torrentLanguage) console.log(`[WORKER] Fallback: Found language from title for "${result.Title}": ${torrentLanguage}`);
+                }
 
                 // Create a consolidated parsedDetails object
                 const consolidatedParsedDetails = {
@@ -319,10 +334,13 @@ parentPort.on('message', (message) => {
                     }
                 }
 
-                // Do NOT skip based on PublishedDate here.
-                // We will pass it along and let the main thread's sorting handle invalid/missing dates by pushing them to the bottom.
-                if (!result.PublishedDate || isNaN(new Date(result.PublishedDate).getTime())) {
-                    console.warn(`[WORKER] Invalid or missing PublishedDate for "${result.Title}". Will be sorted to lower priority.`);
+                // --- Published Date Handling ---
+                // Strictly use result.PublishedDate. If invalid/missing, set to null. No title parsing for date.
+                let torrentPublishedDate = null;
+                if (result.PublishedDate && !isNaN(new Date(result.PublishedDate).getTime())) {
+                    torrentPublishedDate = result.PublishedDate;
+                } else {
+                    console.warn(`[WORKER] Invalid or missing PublishedDate from API for "${result.Title}". Setting to null.`);
                 }
 
                 const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
@@ -330,7 +348,7 @@ parentPort.on('message', (message) => {
                 processedInfoHashes.add(infoHash);
 
                 processedStreams.push({
-                    originalResult: result,
+                    originalResult: result, // Keep original result for data like Title, Tracker, Seeders etc.
                     magnetLink: magnetLink,
                     infoHash: infoHash,
                     parsedDetails: consolidatedParsedDetails, // Use consolidated details
@@ -338,6 +356,7 @@ parentPort.on('message', (message) => {
                     videoQualityRank: getVideoQualityRank(consolidatedParsedDetails.videoQuality),
                     audioQualityRank: getAudioQualityRank(consolidatedParsedDetails.audioQuality),
                     hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && consolidatedParsedDetails.language && PREFERRED_LANGUAGES.includes(consolidatedParsedDetails.language),
+                    effectivePublishedDate: torrentPublishedDate // Pass the strictly API-derived or nullified PublishedDate
                 });
             } catch (innerErr) {
                 // Catch errors for an individual torrent result to prevent the entire worker from crashing
