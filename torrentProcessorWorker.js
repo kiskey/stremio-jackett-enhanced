@@ -61,7 +61,8 @@ function standardizeTitle(title) {
 
     // Remove common release group tags, quality tags, and other extraneous info
     // This regex is extended based on observed patterns in torrent titles
-    standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|generalfilm|nahom|edge2020|xvi|mp3|eac3|subs)\b/g, ' ');
+    standardized = standardized.
+        replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|generalfilm|nahom|edge2020|xvi|mp3|eac3|subs)\b/g, ' ');
     
     // Remove year if it's still present and surrounded by spaces
     if (extractedYear) {
@@ -253,8 +254,9 @@ parentPort.on('message', (message) => {
 
         for (const result of jackettResults) {
             try { // Individual try-catch for each result to prevent worker crash
-                // --- Early Filtering of low-quality types ---
-                const lowerTitle = result.Title ? result.Title.toLowerCase() : ''; // Ensure Title is a string
+                const lowerTitle = result.Title ? result.Title.toLowerCase() : '';
+
+                // --- Early Filtering of low-quality types (TS/Telecine) ---
                 if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
                     continue; // Skip TS/Telecine
                 }
@@ -271,11 +273,30 @@ parentPort.on('message', (message) => {
                 // --- Validate Torrent Title vs. Expected Metadata ---
                 if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue; // Ensure Title is a string
 
-                // --- Parse Torrent Details (Resolution, Quality, Language) ---
-                const parsedDetails = parseTorrentDetails(result.Title || ''); // Ensure Title is a string
+                // --- Prioritize Torznab API fields, fallback to title parsing ---
+                let torrentResolution = simpleGet(result, 'Resolution', null);
+                let torrentVideoQuality = simpleGet(result, 'Quality', null); // Jackett's 'Quality' field
+                let torrentAudioQuality = simpleGet(result, 'AudioChannels', null); // Jackett's 'AudioChannels' or similar
+                let torrentLanguage = simpleGet(result, 'Language', null); // Jackett's 'Language' field
+
+                // If fields are not directly available from API, parse from title as fallback
+                const parsedDetailsFromTitle = parseTorrentDetails(result.Title || '');
+
+                if (!torrentResolution) torrentResolution = parsedDetailsFromTitle.resolution;
+                if (!torrentVideoQuality) torrentVideoQuality = parsedDetailsFromTitle.videoQuality;
+                if (!torrentAudioQuality) torrentAudioQuality = parsedDetailsFromTitle.audioQuality;
+                if (!torrentLanguage) torrentLanguage = parsedDetailsFromTitle.language;
+
+                // Create a consolidated parsedDetails object
+                const consolidatedParsedDetails = {
+                    resolution: torrentResolution,
+                    videoQuality: torrentVideoQuality,
+                    audioQuality: torrentAudioQuality,
+                    language: torrentLanguage
+                };
 
                 // --- Filter out resolutions less than 720p (early) ---
-                if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
+                if (getResolutionRank(consolidatedParsedDetails.resolution) < getResolutionRank('720p')) {
                     continue; // Skip resolutions below 720p
                 }
 
@@ -291,16 +312,15 @@ parentPort.on('message', (message) => {
                     continue;
                 }
 
-                const detectedLanguage = parsedDetails.language;
+                // Check language preference using the consolidated language
                 if (PREFERRED_LANGUAGES.length > 0) {
-                    if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
+                    if (!consolidatedParsedDetails.language || !PREFERRED_LANGUAGES.includes(consolidatedParsedDetails.language)) {
                         continue;
                     }
                 }
 
                 // Do NOT skip based on PublishedDate here.
                 // We will pass it along and let the main thread's sorting handle invalid/missing dates by pushing them to the bottom.
-                // Log a warning if it's invalid, but don't filter out the torrent.
                 if (!result.PublishedDate || isNaN(new Date(result.PublishedDate).getTime())) {
                     console.warn(`[WORKER] Invalid or missing PublishedDate for "${result.Title}". Will be sorted to lower priority.`);
                 }
@@ -313,11 +333,11 @@ parentPort.on('message', (message) => {
                     originalResult: result,
                     magnetLink: magnetLink,
                     infoHash: infoHash,
-                    parsedDetails: parsedDetails, // Reuse parsed details
-                    resolutionRank: getResolutionRank(parsedDetails.resolution),
-                    videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
-                    audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
-                    hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && detectedLanguage && PREFERRED_LANGUAGES.includes(detectedLanguage),
+                    parsedDetails: consolidatedParsedDetails, // Use consolidated details
+                    resolutionRank: getResolutionRank(consolidatedParsedDetails.resolution),
+                    videoQualityRank: getVideoQualityRank(consolidatedParsedDetails.videoQuality),
+                    audioQualityRank: getAudioQualityRank(consolidatedParsedDetails.audioQuality),
+                    hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && consolidatedParsedDetails.language && PREFERRED_LANGUAGES.includes(consolidatedParsedDetails.language),
                 });
             } catch (innerErr) {
                 // Catch errors for an individual torrent result to prevent the entire worker from crashing
