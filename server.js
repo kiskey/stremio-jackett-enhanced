@@ -79,13 +79,18 @@ const TRACKER_CACHE_TTL = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
  */
 const fetchAndCachePublicTrackers = async (publicTrackersUrl) => {
   const currentTime = Date.now();
+  const cacheAge = currentTime - lastTrackersFetchTime;
+
+  log.debug(`[TRACKERS CACHE] Current time: ${currentTime}, Last fetch time: ${lastTrackersFetchTime}, Cache age: ${cacheAge}ms, TTL: ${TRACKER_CACHE_TTL}ms`);
+  log.debug(`[TRACKERS CACHE] Cached trackers length: ${cachedPublicTrackers.length}`);
+
   // If cache is not empty and still fresh, return cached trackers
-  if (cachedPublicTrackers.length > 0 && (currentTime - lastTrackersFetchTime < TRACKER_CACHE_TTL)) {
-    log.debug('Using cached public trackers (still fresh).');
+  if (cachedPublicTrackers.length > 0 && (cacheAge < TRACKER_CACHE_TTL)) {
+    log.debug('[TRACKERS CACHE] Using cached public trackers (still fresh).');
     return cachedPublicTrackers;
   }
 
-  log.info('Fetching public trackers from URL:', publicTrackersUrl);
+  log.info('[TRACKERS CACHE] Fetching public trackers from URL:', publicTrackersUrl);
 
   try {
     const response = await fetch(publicTrackersUrl);
@@ -99,14 +104,14 @@ const fetchAndCachePublicTrackers = async (publicTrackersUrl) => {
     if (trackers.length > 0) {
       cachedPublicTrackers = trackers;
       lastTrackersFetchTime = currentTime;
-      log.info(`Successfully fetched and cached ${trackers.length} public trackers.`);
+      log.info(`[TRACKERS CACHE] Successfully fetched and cached ${trackers.length} public trackers.`);
     } else {
-      log.warn('Fetched an empty list of trackers. Retaining old cache or falling back to empty list.');
+      log.warn('[TRACKERS CACHE] Fetched an empty list of trackers. Retaining old cache or falling back to empty list.');
     }
     return cachedPublicTrackers; // Return the newly fetched or existing cached trackers
   } catch (error) {
-    log.error('Error fetching public trackers:', error.message);
-    log.warn('Using existing cached public trackers or empty list due to fetch error.');
+    log.error('[TRACKERS CACHE] Error fetching public trackers:', error.message);
+    log.warn('[TRACKERS CACHE] Using existing cached public trackers or empty list due to fetch error.');
     return cachedPublicTrackers; 
   }
 };
@@ -162,7 +167,7 @@ const LANGUAGE_PATTERNS = {
  */
 const extractResolution = (title) => {
   for (const res in RESOLUTION_PATTERNS) {
-    if (RESOLUTION_PATTERTS[res].test(title)) { // Corrected typo: RESOLUTION_PATTERTS -> RESOLUTION_PATTERNS
+    if (RESOLUTION_PATTERNS[res].test(title)) { // Corrected typo: RESOLUTION_PATTERTS -> RESOLUTION_PATTERNS
       return res;
     }
   }
@@ -404,8 +409,7 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
         return null;
     }
 
-    let title = tor.Title; 
-
+    // Extract resolution and language for the subtitle
     const resolution = extractResolution(tor.Title) || 'Unknown';
     const language = extractLanguage(tor.Title) || 'Unknown';
 
@@ -418,8 +422,6 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
 
     const subtitle = subtitleParts.join(' / '); 
 
-    title += (title.indexOf('\n') > -1 ? '\r\n' : '\r\n\r\n') + subtitle;
-
     // Prepare sources: existing announces from parsed torrent + enriched trackers
     const existingSources = (parsedTorrent.announce || []).map(x => `tracker:${x}`);
     const newTrackers = currentTrackers.filter(tracker => !existingSources.includes(`tracker:${tracker}`)); // Filter out existing trackers
@@ -427,11 +429,13 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
     const allSources = [...new Set([...existingSources, ...newTrackers.map(t => `tracker:${t}`), `dht:${infoHash}`])];
 
     return {
-        name: tor.Tracker || 'Jackett', 
+        // Set 'name' to the torrent's original title for primary display
+        name: tor.Title, 
         type: type,
         infoHash: infoHash,
         sources: allSources,
-        title: title
+        // Set 'title' to the subtitle parts for secondary display (like below the name)
+        title: subtitle 
     };
 };
 
@@ -655,11 +659,12 @@ app.get('/manifest.json', (req, res) => {
   };
 
   // Initial fetch of trackers with the potentially updated URL
+  // This call will happen when the manifest is requested, ensuring the cache is populated.
   fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
 
   res.json({
     id: 'community.stremio.jackettaddon.enhanced', 
-    version: '1.0.5', // Incremented version after validation logic fix and manifest typo
+    version: '1.0.6', // Incremented version for these fixes
     name: 'Jackett Enhanced Streams',
     description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options. Prioritizes title-based searches for better relevance.',
     resources: ['catalog', 'stream'],
@@ -851,7 +856,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
       queries.push(metadataForValidation.imdbId);
   }
   if (!metadataForValidation.title && metadataForValidation.tmdbId) {
-      queries.push(metadataForValidation.tmdbId.toString());
+      queries.push(metadata.tmdbId.toString());
   }
   queries = [...new Set(queries.filter(q => q && q.trim() !== ''))]; 
 
@@ -953,6 +958,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params; 
 
   log.info(`Stream requested: Type=${type}, ID=${id}`);
+  log.debug(`[STREAM ENDPOINT] Public Trackers URL from config: ${CURRENT_CONFIG.publicTrackersUrl}`);
+
 
   const config = { ...CURRENT_CONFIG }; 
 
@@ -996,7 +1003,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         if (metadata.year) {
             queriesToTry.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
         }
-        queriesToTry.push({ q: metadata.title, cat: category }); // Title alone
+        queriesTo.push({ q: metadata.title, cat: category }); // Title alone
         if (type === 'series' && season && episode) {
             queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
             queriesToTry.push({ q: `${metadata.title} Season ${season} Episode ${episode}`, cat: category });
@@ -1153,6 +1160,8 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     .slice(0, config.maxResults); // Apply user's maxResults after full sorting and filtering
 
     // Fetch trackers once for all streams
+    // This explicit call here is important to ensure trackers are available
+    // for magnet enrichment right before stream creation.
     const currentTrackers = await fetchAndCachePublicTrackers(config.publicTrackersUrl);
 
     for (const link of sortedAndScoredResults) {
@@ -1174,7 +1183,7 @@ app.get('/health', (req, res) => {
 });
 
 // Start the server
-app.listen(PORT, () => {
+app.listen(PORT, async () => { // Made the listen callback async
   log.info(`Stremio Jackett Addon (Node.js) listening on port ${PORT}`);
   log.info(`Manifest URL: http://localhost:${PORT}/manifest.json`);
   log.info(`Jackett URL: ${CURRENT_CONFIG.jackettUrl}`);
@@ -1183,6 +1192,12 @@ app.listen(PORT, () => {
   log.info(`TMDB API Key: ${CURRENT_CONFIG.tmdbApiKey === 'YOUR_TMDB_API_KEY' ? 'YOUR_TMDB_API_KEY' : CURRENT_CONFIG.tmdbApiKey.substring(0, Math.min(CURRENT_CONFIG.tmdbApiKey.length, 5)) + '...'}`);
   log.info(`Public Trackers URL: ${CURRENT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${CURRENT_CONFIG.logLevel}`);
+
+  // Force an initial fetch of trackers on server startup
+  // This helps pre-warm the cache before any Stremio requests come in.
+  log.info('[SERVER STARTUP] Pre-fetching public trackers to warm cache...');
+  await fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
+  log.info('[SERVER STARTUP] Public tracker pre-fetch complete.');
 });
 
 
