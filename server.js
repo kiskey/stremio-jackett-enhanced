@@ -1,8 +1,8 @@
 // server.js - Stremio Addon for Jackett Integration with advanced features and Worker Threads
 
-const { addonBuilder, get, serveHTTP } = require('stremio-addon-sdk');
+const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const { performance } = require('perf_hooks');
-const { Worker } = require('worker_threads'); // Import Worker
+const { Worker } = require('worker_threads');
 require('dotenv').config();
 
 // --- Configuration (Set these as environment variables or update directly) ---
@@ -22,20 +22,14 @@ const MAX_TORRENT_SIZE_MB = parseInt(process.env.MAX_TORRENT_SIZE_MB || '4096', 
 
 const PREFERRED_LANGUAGES = (process.env.PREFERRED_LANGUAGES || '').toLowerCase().split(',').map(lang => lang.trim()).filter(lang => lang.length > 0);
 
-// New: Preferred video qualities for sorting (from best to worst, higher index = lower preference)
-const PREFERRED_VIDEO_QUALITIES_CONFIG = (process.env.PREFERRED_VIDEO_QUALITIES || 'remux,bluray,web-dl,webrip,hdrip,hdtv,dvdrip').toLowerCase().split(',').map(q => q.trim());
-// New: Preferred audio qualities for sorting (from best to worst, higher index = lower preference)
-const PREFERRED_AUDIO_QUALITIES_CONFIG = (process.env.PREFERRED_AUDIO_QUALITIES || 'truehd,dts-hd,atmos,dts,ac3,aac,mp3').toLowerCase().split(',').map(q => q.trim());
-
-const SORT_BY = process.env.SORT_BY || 'recent';
-const SORT_ORDER = process.env.SORT_ORDER || 'desc'; // This is mainly for initial logging/understanding, date sort is fixed
+const PREFERRED_VIDEO_QUALITIES_CONFIG = (process.env.PREFERRED_VIDEO_QUALITIES || 'remux,bluray,bdrip,web-dl,webrip,hdrip,hdtv,dvdrip,x265,x264,hevc,xvid,av1').toLowerCase().split(',').map(q => q.trim());
+const PREFERRED_AUDIO_QUALITIES_CONFIG = (process.env.PREFERRED_AUDIO_QUALITIES || 'truehd,dts-hd,atmos,dts,eac3,ddp,ac3,aac,mp3').toLowerCase().split(',').map(q => q.trim());
 
 // --- Global Cache for Public Trackers ---
 let publicTrackers = [];
 
 /**
  * Fetches and caches a list of public BitTorrent trackers.
- * This function runs once on server startup to warm the cache.
  */
 async function fetchAndCacheTrackers() {
     console.log('[INFO] [TRACKERS CACHE] Fetching public trackers from URL:', TRACKERS_URL);
@@ -57,26 +51,16 @@ async function fetchAndCacheTrackers() {
 
 /**
  * Fetches movie/series metadata from OMDb API using IMDb ID.
- * @param {string} imdbId - The IMDb ID (e.g., 'tt1234567').
- * @returns {Promise<{title: string, year: number, type: string}|null>} - Metadata object or null on failure.
  */
 async function getOmdbMetadata(imdbId) {
     try {
         const url = `http://www.omdbapi.com/?apikey=${OMDb_API_KEY}&i=${imdbId}`;
         const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`OMDb API HTTP error: ${response.statusText}`);
-        }
+        if (!response.ok) throw new Error(`OMDb API HTTP error: ${response.statusText}`);
         const data = await response.json();
-        if (data.Response === 'False') {
-            throw new Error(`OMDb API responded with error: ${data.Error}`);
-        }
+        if (data.Response === 'False') throw new Error(`OMDb API responded with error: ${data.Error}`);
         const yearMatch = data.Year ? data.Year.match(/\d{4}/) : null;
-        return {
-            title: data.Title,
-            year: yearMatch ? parseInt(yearMatch[0], 10) : null,
-            type: data.Type === 'movie' ? 'movie' : 'series'
-        };
+        return { title: data.Title, year: yearMatch ? parseInt(yearMatch[0], 10) : null, type: data.Type === 'movie' ? 'movie' : 'series' };
     } catch (error) {
         console.warn(`[WARN] OMDb metadata fetch failed for ${imdbId}:`, error.message);
         return null;
@@ -85,44 +69,28 @@ async function getOmdbMetadata(imdbId) {
 
 /**
  * Fetches movie/series metadata from TMDB API using IMDb ID.
- * @param {string} imdbId - The IMDb ID (e.g., 'tt1234567').
- * @param {string} itemType - 'movie' or 'series' to guide the TMDB search.
- * @returns {Promise<{title: string, year: number, type: string}|null>} - Metadata object or null on failure.
  */
 async function getTmdbMetadata(imdbId, itemType) {
     let mediaType = itemType === 'movie' ? 'movie' : 'tv';
     try {
         const findUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&language=en-US&external_source=imdb_id`;
         const findResponse = await fetch(findUrl);
-        if (!findResponse.ok) {
-            throw new Error(`TMDB Find API HTTP error: ${findResponse.statusText}`);
-        }
+        if (!findResponse.ok) throw new Error(`TMDB Find API HTTP error: ${findResponse.statusText}`);
         const findData = await findResponse.json();
 
         let tmdbId = null;
-        if (mediaType === 'movie' && findData.movie_results && findData.movie_results.length > 0) {
-            tmdbId = findData.movie_results[0].id;
-        } else if (mediaType === 'tv' && findData.tv_results && findData.tv_results.length > 0) {
-            tmdbId = findData.tv_results[0].id;
-        }
-        if (!tmdbId) {
-            throw new Error('TMDB ID not found for IMDb ID');
-        }
+        if (mediaType === 'movie' && findData.movie_results && findData.movie_results.length > 0) tmdbId = findData.movie_results[0].id;
+        else if (mediaType === 'tv' && findData.tv_results && findData.tv_results.length > 0) tmdbId = findData.tv_results[0].id;
+        if (!tmdbId) throw new Error('TMDB ID not found for IMDb ID');
 
         const detailsUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`;
         const detailsResponse = await fetch(detailsUrl);
-        if (!detailsResponse.ok) {
-            throw new Error(`TMDB Details API HTTP error: ${detailsResponse.statusText}`);
-        }
+        if (!detailsResponse.ok) throw new Error(`TMDB Details API HTTP error: ${detailsResponse.statusText}`);
         const detailsData = await detailsResponse.json();
 
         const year = detailsData.release_date ? parseInt(detailsData.release_date.substring(0, 4), 10) :
                      (detailsData.first_air_date ? parseInt(detailsData.first_air_date.substring(0, 4), 10) : null);
-        return {
-            title: detailsData.title || detailsData.name,
-            year: year,
-            type: mediaType === 'movie' ? 'movie' : 'series'
-        };
+        return { title: detailsData.title || detailsData.name, year: year, type: mediaType === 'movie' ? 'movie' : 'series' };
     } catch (error) {
         console.warn(`[WARN] TMDB metadata fetch failed for ${imdbId} (type:${itemType}):`, error.message);
         return null;
@@ -131,12 +99,6 @@ async function getTmdbMetadata(imdbId, itemType) {
 
 /**
  * Performs a search on Jackett's Torznab API.
- * @param {string} query - The main search query.
- * @param {string} imdbId - The IMDb ID.
- * @param {string} itemType - 'movie' or 'series'.
- * @param {number} [season] - Season number for series.
- * @param {number} [episode] - Episode number for series.
- * @returns {Promise<Array<Object>>} - Array of Jackett search results.
  */
 async function jackettSearch(query, imdbId, itemType, season, episode) {
     let url = `${JACKETT_HOST}/api/v2.0/indexers/all/results?apikey=${JACKETT_API_KEY}&Query=${encodeURIComponent(query)}`;
@@ -157,21 +119,18 @@ async function jackettSearch(query, imdbId, itemType, season, episode) {
 // --- Worker Thread Processing Function ---
 /**
  * Processes Jackett results in a worker thread.
- * @param {Array<Object>} jackettResults - Raw results from Jackett.
- * @param {Object} metadata - Movie/series metadata.
- * @param {number} season - Season number.
- * @param {number} episode - Episode number.
- * @param {Object} config - Relevant addon configuration for filtering/parsing.
- * @param {string[]} publicTrackers - List of public trackers.
- * @returns {Promise<Array<Object>>} - Promise resolving to an array of processed and initially sorted streams.
  */
 function processTorrentsInWorker(jackettResults, metadata, season, episode, config, publicTrackers) {
     return new Promise((resolve, reject) => {
         const worker = new Worker('./torrentProcessorWorker.js');
 
-        worker.on('message', (processedStreams) => {
-            resolve(processedStreams);
-            worker.terminate(); // Terminate the worker after it sends the message
+        worker.on('message', (message) => {
+            if (message.error) {
+                reject(new Error(`Worker Error: ${message.error}\nStack: ${message.stack}`));
+            } else {
+                resolve(message);
+            }
+            worker.terminate();
         });
 
         worker.on('error', (err) => {
@@ -182,11 +141,11 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 
         worker.on('exit', (code) => {
             if (code !== 0) {
-                console.error(`[ERROR] Worker thread exited with code ${code}`);
+                console.error(`[ERROR] Worker thread exited with code ${code}. Check torrentProcessorWorker.js for unhandled exceptions.`);
+                reject(new Error(`Worker thread exited unexpectedly with code ${code}`));
             }
         });
 
-        // Send data to the worker
         worker.postMessage({
             jackettResults,
             metadata,
@@ -200,7 +159,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
                 PREFERRED_VIDEO_QUALITIES_CONFIG: config.PREFERRED_VIDEO_QUALITIES_CONFIG,
                 PREFERRED_AUDIO_QUALITIES_CONFIG: config.PREFERRED_AUDIO_QUALITIES_CONFIG,
             },
-            publicTrackers: publicTrackers // Pass public trackers for magnet link creation in worker
+            publicTrackers: publicTrackers
         });
     });
 }
@@ -208,7 +167,7 @@ function processTorrentsInWorker(jackettResults, metadata, season, episode, conf
 // --- Stremio Addon Setup ---
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.3.0', // Updated version for Worker Threads
+    version: '1.4.0', // Updated version for enhanced parsing and filtering
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering, validation, and quality sorting, optimized with Worker Threads.',
     resources: ['stream'],
@@ -221,7 +180,7 @@ const builder = new addonBuilder({
 
 // Define the stream handler
 builder.defineStreamHandler(async (args) => {
-    const startTime = performance.now();
+    const totalStartTime = performance.now();
 
     const imdbId = args.id.split(':')[0];
     const itemType = args.type;
@@ -237,14 +196,16 @@ builder.defineStreamHandler(async (args) => {
 
     console.log(`[INFO] Stream requested: Type=${itemType}, ID=${args.id}`);
     console.log(`[CONFIG] Filters: Min Seeders=${MINIMUM_SEEDERS}, Min Size=${MIN_TORRENT_SIZE_MB}MB, Max Size=${MAX_TORRENT_SIZE_MB}MB, Preferred Languages=[${PREFERRED_LANGUAGES.join(', ')}]`);
-    console.log(`[CONFIG] Sorting: Initial by='recent', Quality Prefs: Video=[${PREFERRED_VIDEO_QUALITIES_CONFIG.join(', ')}], Audio=[${PREFERRED_AUDIO_QUALITIES_CONFIG.join(', ')}]`);
+    console.log(`[CONFIG] Quality Prefs: Video=[${PREFERRED_VIDEO_QUALITIES_CONFIG.join(', ')}], Audio=[${PREFERRED_AUDIO_QUALITIES_CONFIG.join(', ')}]`);
 
     try {
-        // --- Step 1: Fetch metadata in parallel from OMDb and TMDB ---
+        const metadataStartTime = performance.now();
         const [omdbResult, tmdbResult] = await Promise.allSettled([
             getOmdbMetadata(imdbId),
             getTmdbMetadata(imdbId, itemType)
         ]);
+        const metadataEndTime = performance.now();
+        console.log(`[INFO] Metadata fetch time: ${((metadataEndTime - metadataStartTime) / 1000).toFixed(2)} seconds.`);
 
         let metadata = null;
         let searchQueryTitle = imdbId;
@@ -272,12 +233,14 @@ builder.defineStreamHandler(async (args) => {
             jackettQuery = `${searchQueryTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`;
         }
 
-        // --- Step 2: Perform Jackett search ---
+        const jackettSearchStartTime = performance.now();
         console.log(`[INFO] Searching Jackett for: "${jackettQuery}" (IMDb: ${imdbId})`);
         const jackettResults = await jackettSearch(jackettQuery, imdbId, determinedType, season, episode);
-        console.log(`[INFO] Jackett returned ${jackettResults.length} raw results.`);
+        const jackettSearchEndTime = performance.now();
+        console.log(`[INFO] Jackett search returned ${jackettResults.length} raw results in ${((jackettSearchEndTime - jackettSearchStartTime) / 1000).toFixed(2)} seconds.`);
 
-        // --- Stage 1 & 2 (Offloaded to Worker): Process, Filter, Validate & Initial Date Sort ---
+        // --- Offload heavy processing to Worker Thread ---
+        const workerProcessingStartTime = performance.now();
         console.log('[INFO] Offloading torrent processing to worker thread...');
         const processedStreams = await processTorrentsInWorker(
             jackettResults,
@@ -292,14 +255,17 @@ builder.defineStreamHandler(async (args) => {
                 PREFERRED_VIDEO_QUALITIES_CONFIG,
                 PREFERRED_AUDIO_QUALITIES_CONFIG,
             },
-            publicTrackers // Pass public trackers for magnet link construction in worker
+            publicTrackers
         );
-        console.log(`[INFO] Worker returned ${processedStreams.length} processed and date-sorted streams.`);
+        const workerProcessingEndTime = performance.now();
+        console.log(`[INFO] Worker processing completed. Time: ${((workerProcessingEndTime - workerProcessingStartTime) / 1000).toFixed(2)} seconds.`);
+        console.log(`[INFO] Worker returned ${processedStreams.length} processed and date-sorted streams to main thread.`);
 
-        // --- Stage 3: Complex Quality Sort (on the top N candidates) ---
-        // Taking more than MAX_STREAMS from the worker's result to ensure we have enough for quality sort
+        // --- Stage 3: Complex Quality Sort (on the top N candidates in main thread) ---
+        // Take up to 2x MAX_STREAMS from the worker's result to ensure we have enough for quality sort
         const candidatesForFinalSort = processedStreams.slice(0, MAX_STREAMS * 2);
 
+        const finalSortStartTime = performance.now();
         candidatesForFinalSort.sort((a, b) => {
             // 1. Preferred Language (highest priority)
             if (a.hasPreferredLanguage && !b.hasPreferredLanguage) return -1;
@@ -323,6 +289,9 @@ builder.defineStreamHandler(async (args) => {
             // 5. Seeders (descending, final tie-breaker)
             return b.originalResult.Seeders - a.originalResult.Seeders;
         });
+        const finalSortEndTime = performance.now();
+        console.log(`[INFO] Main thread final sorting time: ${((finalSortEndTime - finalSortStartTime) / 1000).toFixed(2)} seconds.`);
+
 
         // --- Stage 4: Format for Stremio and apply final MAX_STREAMS limit ---
         const stremioStreams = [];
@@ -348,8 +317,8 @@ builder.defineStreamHandler(async (args) => {
 
         console.log(`[INFO] [STREMIO RESPONSE] Sending ${stremioStreams.length} streams to Stremio for ID: ${args.id}`);
 
-        const endTime = performance.now();
-        console.log(`[INFO] Total processing time for ${args.id}: ${((endTime - startTime) / 1000).toFixed(2)} seconds.`);
+        const totalEndTime = performance.now();
+        console.log(`[INFO] Total processing time for ${args.id}: ${((totalEndTime - totalStartTime) / 1000).toFixed(2)} seconds.`);
 
         return { streams: stremioStreams };
 
