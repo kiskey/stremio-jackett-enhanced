@@ -125,14 +125,20 @@ setInterval(fetchAndCachePublicTrackers, TRACKER_CACHE_TTL);
  * Normalizes a string for comparison by converting to lowercase,
  * removing non-alphanumeric characters (except spaces), and collapsing multiple spaces.
  * @param {string} str - The input string.
+ * @param {boolean} aggressive - If true, removes all non-alphanumeric chars including spaces, dots, hyphens.
  * @returns {string} The normalized string.
  */
-const normalizeString = (str) => {
+const normalizeString = (str, aggressive = false) => {
   if (!str) return '';
-  // Remove anything that's not a letter, number, or space
-  return str.toLowerCase().replace(/[^a-z0-9\s]/g, '')
-            .replace(/\s+/g, ' ') // Replace multiple spaces with a single space
-            .trim(); // Trim leading/trailing spaces
+  if (aggressive) {
+    // Aggressive normalization: remove all non-alphanumeric characters and spaces
+    return str.toLowerCase().replace(/[^a-z0-9]/g, '');
+  } else {
+    // Standard normalization: remove special characters but keep spaces, collapse multiple spaces
+    return str.toLowerCase().replace(/[^a-z0-9\s]/g, '')
+              .replace(/\s+/g, ' ')
+              .trim();
+  }
 };
 
 // Regex patterns for resolution and language extraction from torrent titles
@@ -283,7 +289,8 @@ const fetchMetadataFromOmdbTmdb = async (imdbId) => {
       } else {
         log.warn(`TMDB did not find results for IMDB ID: ${imdbId}`);
       }
-    } catch (error) {
+    }
+    catch (error) {
       log.error(`Error fetching from TMDB for ${imdbId}: ${error.message}`);
     }
   } else {
@@ -435,11 +442,11 @@ const createStremioStream = (tor, type, magnetUri) => {
  */
 const calculateMatchScore = (item, metadata) => {
     let score = 0;
-    const normalizedItemTitle = normalizeString(item.Title);
+    const normalizedItemTitle = normalizeString(item.Title, true); // Use aggressive normalization for scoring
     const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
 
-    const normalizedPrimaryTitle = normalizeString(metadata.title);
-    const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t));
+    const normalizedPrimaryTitle = normalizeString(metadata.title, true);
+    const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t, true));
 
     // Strongest match: Normalized Primary Title + Year
     if (normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle) && metadata.year && itemYearMatch === metadata.year) {
@@ -470,10 +477,9 @@ const calculateMatchScore = (item, metadata) => {
         }
     }
 
-    // Boost for exact normalized title match (whole word) if available - can be a strong indicator
-    // This looks for an exact word match of the primary title in the torrent title
-    if (normalizedPrimaryTitle && normalizedItemTitle.split(' ').includes(normalizedPrimaryTitle)) { 
-        score += 2;
+    // Boost for exact normalized title match (whole string) if available - can be a strong indicator
+    if (normalizedPrimaryTitle && normalizedItemTitle === normalizedPrimaryTitle) { 
+        score += 5;
     }
 
     // Boost if item title contains IMDB/TMDB ID (especially for ID-based queries)
@@ -497,7 +503,7 @@ const calculateMatchScore = (item, metadata) => {
  * @returns {boolean} True if the item passes validation, false otherwise.
  */
 const validateJackettResult = (item, metadata, wasIdQuery) => {
-  const normalizedItemTitle = normalizeString(item.Title);
+  const normalizedItemTitle = normalizeString(item.Title, true); // Use aggressive normalization for validation
   const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null; // Use word boundary for year
 
   // 1. Basic check: Ensure MagnetUri exists.
@@ -510,26 +516,27 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
   let passesTitleMatch = false;
   let debugReason = '';
 
-  const normalizedPrimaryTitle = normalizeString(metadata.title);
-  const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t));
+  const normalizedPrimaryTitle = normalizeString(metadata.title, true);
+  const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t, true));
 
   if (wasIdQuery) {
     // If original query was by ID (IMDB/TMDB), we expect a strong connection.
-    // It must match title (primary or aka) AND year (if present) OR contain the IMDB ID directly.
+    // It must match a normalized title (primary or aka) AND year (if present) OR contain the IMDB/TMDB ID directly.
     const titleMatchesPrimaryOrAka = [normalizedPrimaryTitle, ...normalizedAkaTitles].some(t => t && normalizedItemTitle.includes(t));
     const yearMatches = (metadata.year && itemYearMatch) ? (itemYearMatch === metadata.year) : true; // If no year info, it passes
 
-    if (titleMatchesPrimaryOrAka && yearMatches) {
+    const containsImdbId = metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase());
+    const containsTmdbId = metadata.tmdbId && normalizedItemTitle.includes(metadata.tmdbId.toString());
+
+    if ((titleMatchesPrimaryOrAka && yearMatches) || containsImdbId || containsTmdbId) {
         passesTitleMatch = true;
-        debugReason = "ID Query: Title/AKA/Year Match";
-    } else if (metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase())) {
-        // As a last resort for ID queries, if title/year doesn't match but IMDB ID is in torrent title.
-        passesTitleMatch = true;
-        debugReason = "ID Query: Fallback IMDB ID in torrent title";
+        if (titleMatchesPrimaryOrAka && yearMatches) debugReason = "ID Query: Title/AKA/Year Match";
+        else if (containsImdbId) debugReason = "ID Query: IMDB ID in torrent title";
+        else if (containsTmdbId) debugReason = "ID Query: TMDB ID in torrent title";
     }
 
     if (!passesTitleMatch) {
-        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}".`);
+        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}". (Reason: ${debugReason})`);
         return false; // **CRITICAL FIX: Return false if ID query validation fails.**
     } else {
         log.debug(`Validation passed: ID-based query match for "${item.Title}". (Reason: ${debugReason})`);
@@ -754,7 +761,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
 // Stream endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
-  const { type, id } = req.params; // id here is the videoId (e.g., 'tt1234567' or 'jackett:Movie-Title-1200')
+  const { type, id } = req.params; // id here is the videoId (e.g., 'tt1234567' or 'jackett:Movie-Title-102000')
 
   log.info(`Stream requested: Type=${type}, ID=${id}`);
 
@@ -914,4 +921,3 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
 });
-
