@@ -22,7 +22,7 @@ let MAX_TORRENT_SIZE_MB;
 let PREFERRED_LANGUAGES;
 let PREFERRED_VIDEO_QUALITIES_CONFIG;
 let PREFERRED_AUDIO_QUALITIES_CONFIG;
-let INITIAL_DATE_FILTER_LIMIT; // New config: limit for initial date-based filtering
+// INITIAL_DATE_FILTER_LIMIT is no longer needed in worker as sorting/limiting is done in main thread query
 
 // --- Utility Functions for Validation, Parsing, and Filtering ---
 
@@ -237,25 +237,15 @@ parentPort.on('message', (message) => {
         PREFERRED_LANGUAGES = config.PREFERRED_LANGUAGES;
         PREFERRED_VIDEO_QUALITIES_CONFIG = config.PREFERRED_VIDEO_QUALITIES_CONFIG;
         PREFERRED_AUDIO_QUALITIES_CONFIG = config.PREFERRED_AUDIO_QUALITIES_CONFIG;
-        INITIAL_DATE_FILTER_LIMIT = config.INITIAL_DATE_FILTER_LIMIT; // Get the new config
 
         const processedStreams = [];
         const processedInfoHashes = new Set();
 
-        // --- Stage 1: Initial Filter by PublishedDate (Recency) ---
-        // Sort raw Jackett results by PublishedDate descending first to get the latest
-        // Invalid dates will be treated as older (pushed to the end of this initial sort)
-        const sortedByDateResults = jackettResults.sort((a, b) => {
-            const dateA = a.PublishedDate && !isNaN(new Date(a.PublishedDate).getTime()) ? new Date(a.PublishedDate).getTime() : 0; // 0 for invalid/missing dates
-            const dateB = b.PublishedDate && !isNaN(new Date(b.PublishedDate).getTime()) ? new Date(b.PublishedDate).getTime() : 0;
-            return dateB - dateA; // Descending order (latest first)
-        });
+        // Jackett results are already limited and sorted by date via the API query in server.js
+        const resultsToProcess = jackettResults; 
+        console.log(`[WORKER] Received ${resultsToProcess.length} results from main thread (already date-sorted and limited by Jackett API).`);
 
-        // Take only the top N latest results for further, more intensive processing
-        const limitedResults = sortedByDateResults.slice(0, INITIAL_DATE_FILTER_LIMIT);
-        console.log(`[WORKER] After initial date sort and limit (${INITIAL_DATE_FILTER_LIMIT}), ${limitedResults.length} results remain for detailed processing.`);
-
-        for (const result of limitedResults) {
+        for (const result of resultsToProcess) {
             try { // Individual try-catch for each result to prevent worker crash
                 const lowerTitle = result.Title ? result.Title.toLowerCase() : '';
 
@@ -335,12 +325,12 @@ parentPort.on('message', (message) => {
                 }
 
                 // --- Published Date Handling ---
-                // Strictly use result.PublishedDate. If invalid/missing, set to null. No title parsing for date.
+                // Strictly use result.PublishedDate from API. If invalid/missing, set to null.
                 let torrentPublishedDate = null;
                 if (result.PublishedDate && !isNaN(new Date(result.PublishedDate).getTime())) {
                     torrentPublishedDate = result.PublishedDate;
                 } else {
-                    console.warn(`[WORKER] Invalid or missing PublishedDate from API for "${result.Title}". Setting to null.`);
+                    console.warn(`[WORKER] Invalid or missing PublishedDate from API for "${result.Title}". Setting to null for sorting.`);
                 }
 
                 const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
