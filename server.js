@@ -121,6 +121,19 @@ fetchAndCachePublicTrackers();
 // Schedule periodic refresh of public trackers
 setInterval(fetchAndCachePublicTrackers, TRACKER_CACHE_TTL);
 
+/**
+ * Normalizes a string for comparison by converting to lowercase,
+ * removing non-alphanumeric characters (except spaces), and collapsing multiple spaces.
+ * @param {string} str - The input string.
+ * @returns {string} The normalized string.
+ */
+const normalizeString = (str) => {
+  if (!str) return '';
+  // Remove anything that's not a letter, number, or space
+  return str.toLowerCase().replace(/[^a-z0-9\s]/g, '')
+            .replace(/\s+/g, ' ') // Replace multiple spaces with a single space
+            .trim(); // Trim leading/trailing spaces
+};
 
 // Regex patterns for resolution and language extraction from torrent titles
 const RESOLUTION_PATTERNS = {
@@ -422,55 +435,52 @@ const createStremioStream = (tor, type, magnetUri) => {
  */
 const calculateMatchScore = (item, metadata) => {
     let score = 0;
-    const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
-    // Use word boundary for year to avoid matching "1999" in "A.1999.Film" as a year if it's not
+    const normalizedItemTitle = normalizeString(item.Title);
     const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
 
-    const primaryTitleLower = metadata.title ? metadata.title.toLowerCase() : '';
-    const akaTitlesLower = (metadata.akaTitles || []).map(t => t.toLowerCase());
+    const normalizedPrimaryTitle = normalizeString(metadata.title);
+    const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t));
 
-    // Score based on title and year match
-    // Strongest match: Primary Title + Year
-    if (primaryTitleLower && itemTitleLower.includes(primaryTitleLower) && metadata.year && itemYearMatch === metadata.year) {
+    // Strongest match: Normalized Primary Title + Year
+    if (normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle) && metadata.year && itemYearMatch === metadata.year) {
         score += 100;
     } 
-    // Next: Primary Title only (if year doesn't match or not available)
-    else if (primaryTitleLower && itemTitleLower.includes(primaryTitleLower)) {
+    // Next: Normalized Primary Title only (if year doesn't match or not available)
+    else if (normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle)) {
         score += 10;
     }
 
-    // Iterate through aka titles for scoring
-    for (const akaTitle of akaTitlesLower) {
-        // Strongest aka match: AKA Title + Year
-        if (akaTitle && itemTitleLower.includes(akaTitle) && metadata.year && itemYearMatch === metadata.year) {
+    // Iterate through normalized aka titles for scoring
+    for (const akaTitle of normalizedAkaTitles) {
+        // Strongest aka match: Normalized AKA Title + Year
+        if (akaTitle && normalizedItemTitle.includes(akaTitle) && metadata.year && itemYearMatch === metadata.year) {
             score += 50; // Bonus for aka title + year match
         } 
-        // Next: AKA Title only (if year doesn't match or not available)
-        else if (akaTitle && itemTitleLower.includes(akaTitle)) {
+        // Next: Normalized AKA Title only (if year doesn't match or not available)
+        else if (akaTitle && normalizedItemTitle.includes(akaTitle)) {
             score += 5; // Base score for aka title match
         }
     }
     
     // Penalize if the torrent title contains an obvious different year when metadata year is known
-    // This check should only apply if there was some title match already, to avoid penalizing irrelevant torrents.
     if (metadata.year && itemYearMatch && itemYearMatch !== metadata.year) {
         // Only penalize if it seemed like it was trying to match the title
-        if (itemTitleLower.includes(primaryTitleLower) || akaTitlesLower.some(t => itemTitleLower.includes(t))) {
+        if (normalizedItemTitle.includes(normalizedPrimaryTitle) || normalizedAkaTitles.some(t => normalizedItemTitle.includes(t))) {
              score -= 20; // Penalize for wrong year
         }
     }
 
-    // Boost for exact title match (whole word) if available - can be a strong indicator
+    // Boost for exact normalized title match (whole word) if available - can be a strong indicator
     // This looks for an exact word match of the primary title in the torrent title
-    if (primaryTitleLower && itemTitleLower.split(/\W+/).includes(primaryTitleLower.split(/\W+/).join(''))) { // check for whole word match
+    if (normalizedPrimaryTitle && normalizedItemTitle.split(' ').includes(normalizedPrimaryTitle)) { 
         score += 2;
     }
 
     // Boost if item title contains IMDB/TMDB ID (especially for ID-based queries)
-    if (metadata.imdbId && itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
+    if (metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase())) {
         score += 1;
     }
-    if (metadata.tmdbId && itemTitleLower.includes(metadata.tmdbId.toString())) {
+    if (metadata.tmdbId && normalizedItemTitle.includes(metadata.tmdbId.toString())) {
         score += 0.5;
     }
 
@@ -487,7 +497,7 @@ const calculateMatchScore = (item, metadata) => {
  * @returns {boolean} True if the item passes validation, false otherwise.
  */
 const validateJackettResult = (item, metadata, wasIdQuery) => {
-  const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
+  const normalizedItemTitle = normalizeString(item.Title);
   const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null; // Use word boundary for year
 
   // 1. Basic check: Ensure MagnetUri exists.
@@ -500,26 +510,26 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
   let passesTitleMatch = false;
   let debugReason = '';
 
-  const primaryTitleLower = metadata.title ? metadata.title.toLowerCase() : '';
-  const akaTitlesLower = (metadata.akaTitles || []).map(t => t.toLowerCase());
+  const normalizedPrimaryTitle = normalizeString(metadata.title);
+  const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t));
 
   if (wasIdQuery) {
     // If original query was by ID (IMDB/TMDB), we expect a strong connection.
     // It must match title (primary or aka) AND year (if present) OR contain the IMDB ID directly.
-    const titleMatchesPrimaryOrAka = [primaryTitleLower, ...akaTitlesLower].some(t => t && itemTitleLower.includes(t));
+    const titleMatchesPrimaryOrAka = [normalizedPrimaryTitle, ...normalizedAkaTitles].some(t => t && normalizedItemTitle.includes(t));
     const yearMatches = (metadata.year && itemYearMatch) ? (itemYearMatch === metadata.year) : true; // If no year info, it passes
 
     if (titleMatchesPrimaryOrAka && yearMatches) {
         passesTitleMatch = true;
         debugReason = "ID Query: Title/AKA/Year Match";
-    } else if (metadata.imdbId && itemTitleLower.includes(metadata.imdbId.toLowerCase())) {
+    } else if (metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase())) {
         // As a last resort for ID queries, if title/year doesn't match but IMDB ID is in torrent title.
         passesTitleMatch = true;
         debugReason = "ID Query: Fallback IMDB ID in torrent title";
     }
 
     if (!passesTitleMatch) {
-        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected "${primaryTitleLower}" (${metadata.year}) or aka titles or IMDB ID "${metadata.imdbId}".`);
+        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}".`);
         return false; // **CRITICAL FIX: Return false if ID query validation fails.**
     } else {
         log.debug(`Validation passed: ID-based query match for "${item.Title}". (Reason: ${debugReason})`);
@@ -528,12 +538,12 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
   } else { // Original query was title-based (e.g., from search box or catalog click)
     
     // Prioritize exact or strong title + year match
-    if (metadata.title && metadata.year && itemTitleLower.includes(primaryTitleLower) && itemYearMatch === metadata.year) {
+    if (normalizedPrimaryTitle && metadata.year && normalizedItemTitle.includes(normalizedPrimaryTitle) && itemYearMatch === metadata.year) {
         passesTitleMatch = true;
         debugReason = "Exact Title+Year Match";
-    } else if (metadata.akaTitles && metadata.akaTitles.length > 0) {
-        for (const akaTitle of akaTitlesLower) {
-            if (itemTitleLower.includes(akaTitle)) {
+    } else if (normalizedAkaTitles.length > 0) {
+        for (const akaTitle of normalizedAkaTitles) {
+            if (normalizedItemTitle.includes(akaTitle)) {
                 if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
                     passesTitleMatch = true;
                     debugReason = "AKA Title+Year Match";
@@ -548,13 +558,13 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
     }
     
     // Fallback to just primary title match if no strong match found (only if metadata title is available)
-    if (!passesTitleMatch && metadata.title && itemTitleLower.includes(primaryTitleLower)) {
+    if (!passesTitleMatch && normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle)) {
         passesTitleMatch = true;
         debugReason = "Basic Title Match";
     }
     
     if (!passesTitleMatch) {
-        log.debug(`Validation failed: Title-based query, no sufficient title/year match for "${item.Title}". Expected variations of "${metadata.title}" (${metadata.year}) / AKA Titles. (Reason: ${debugReason})`);
+        log.debug(`Validation failed: Title-based query, no sufficient title/year match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) / AKA Titles. (Reason: ${debugReason})`);
         return false;
     } else {
         log.debug(`Validation passed: Title-based query match for "${item.Title}". (Reason: ${debugReason})`);
@@ -683,27 +693,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
       // Calculate match score for each validated item in catalog
       const resultsWithScore = validatedResults.map(item => {
-          // Simplified score for catalog, based on how well it matches the initial search query
-          let catalogScore = 0;
-          const itemTitleLower = item.Title ? item.Title.toLowerCase() : '';
-          const searchQLower = jackettSearchQuery ? jackettSearchQuery.toLowerCase() : '';
-          
-          if (searchQLower && itemTitleLower.includes(searchQLower)) {
-              catalogScore += 10;
-              // Additional check for year if available in search query or metadataForValidation
-              const searchYearMatch = jackettSearchQuery.match(/\b(\d{4})\b/) ? jackettSearchQuery.match(/\b(\d{4})\b/)[1] : null;
-              const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
-              if (searchYearMatch && itemYearMatch && searchYearMatch === itemYearMatch) {
-                  catalogScore += 5;
-              } else if (metadataForValidation.year && itemYearMatch && metadataForValidation.year === itemYearMatch) {
-                   catalogScore += 3;
-              }
-          }
-          // If the query was an IMDB ID, and the torrent title includes it, give a small boost
-          if (metadataForValidation.imdbId && itemTitleLower.includes(metadataForValidation.imdbId.toLowerCase())) {
-              catalogScore += 2;
-          }
-
+          // Add detailed properties for sorting
           const resolution = extractResolution(item.Title) || 'Unknown';
           const language = extractLanguage(item.Title) || 'Unknown';
 
@@ -718,7 +708,7 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
               originalSize: item.Size || 0,
               resolution: resolution,
               language: language,
-              score: catalogScore, // Add score to catalog item
+              score: calculateMatchScore(item, metadataForValidation), // Calculate score here
           };
       }).filter(Boolean); // Ensure no nulls are passed due to missing MagnetUri
 
@@ -924,3 +914,4 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
 });
+
