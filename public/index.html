@@ -1,117 +1,188 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Jackett Stremio Addon Configuration</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stremio Jackett Addon Configuration</title>
+    <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; color: #333; margin: 0; padding: 0; }
-        .container { max-width: 900px; margin: 2rem auto; padding: 1.5rem; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); }
-        .section { margin-bottom: 2rem; padding: 1.5rem; border-radius: 10px; background-color: #f9fafb; border: 1px solid #e5e7eb; }
-        .label { font-weight: bold; margin-bottom: 0.5rem; display: block; color: #1f2937; }
-        .value { margin-bottom: 1rem; color: #4b5563; }
-        .config-block { background-color: #edf2f7; padding: 1.2rem; border-radius: 8px; margin-top: 1rem; word-wrap: break-word; font-family: monospace; font-size: 0.9em; line-height: 1.4; }
-        .error { color: #dc2626; font-weight: bold; background-color: #fee2e2; border: 1px solid #fca5a5; padding: 0.75rem; border-radius: 8px; margin-top: 1rem; }
-        .hidden { display: none; }
-        h1 { color: #1a202c; }
-        h2 { color: #2d3748; }
-        code { background-color: #e2e8f0; padding: 0.2em 0.4em; border-radius: 4px; font-weight: 600; }
-        pre { background-color: #2d3748; color: #e2e8f0; padding: 1.5rem; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
-        ul { list-style: none; padding: 0; margin: 0; }
-        li { margin-bottom: 0.5rem; }
-        li strong { color: #2c5282; } /* Darker blue for strong labels */
-
-        /* Responsive adjustments */
-        @media (max-width: 768px) {
-            .container { margin: 1rem; padding: 1rem; }
-            .section { padding: 1rem; }
+        body {
+            font-family: 'Inter', sans-serif;
         }
     </style>
 </head>
-<body>
-    <div class="container rounded-lg shadow-xl">
-        <h1 class="text-4xl font-extrabold mb-6 text-center">Jackett Stremio Addon Configuration</h1>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen p-4">
+    <div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-2xl">
+        <h1 class="text-3xl font-bold text-gray-800 mb-6 text-center">Stremio Jackett Addon Configuration</h1>
 
-        <div class="section">
-            <h2 class="text-2xl font-bold mb-4">Current Configuration:</h2>
-            <div id="current-config" class="config-block">
-                Loading configuration...
+        <p class="text-gray-700 mb-4 text-center">
+            Configure your Jackett and API keys. These settings will be displayed below as environment variables or a Stremio manifest URL.
+            For production, it's highly recommended to set these as actual environment variables in your deployment environment
+            (e.g., Docker, Heroku, `~/.bashrc`, `.env` file).
+        </p>
+
+        <div class="space-y-4">
+            <!-- Jackett Configuration -->
+            <div>
+                <label for="jackettHost" class="block text-sm font-medium text-gray-700">Jackett Host (e.g., http://localhost:9117):</label>
+                <input type="text" id="jackettHost" value="http://localhost:9117"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
             </div>
-            <p id="error-message" class="error hidden">Error loading configuration. Please check your Node.js server console for more details.</p>
+            <div>
+                <label for="jackettApiKey" class="block text-sm font-medium text-gray-700">Jackett API Key:</label>
+                <input type="text" id="jackettApiKey" placeholder="YOUR_JACKETT_API_KEY"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+
+            <!-- API Keys -->
+            <div>
+                <label for="omdbApiKey" class="block text-sm font-medium text-gray-700">OMDb API Key:</label>
+                <input type="text" id="omdbApiKey" placeholder="YOUR_OMDB_API_KEY"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="tmdbApiKey" class="block text-sm font-medium text-gray-700">TMDB API Key:</label>
+                <input type="text" id="tmdbApiKey" placeholder="YOUR_TMDB_API_KEY"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+
+            <!-- Optional Configuration -->
+            <div>
+                <label for="minSeeders" class="block text-sm font-medium text-gray-700">Minimum Seeders:</label>
+                <input type="number" id="minSeeders" value="0" min="0"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="maxStreams" class="block text-sm font-medium text-gray-700">Max Streams to Return:</label>
+                <input type="number" id="maxStreams" value="20" min="1"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="minTorrentSize" class="block text-sm font-medium text-gray-700">Min Torrent Size (MB):</label>
+                <input type="number" id="minTorrentSize" value="10" min="0"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="maxTorrentSize" class="block text-sm font-medium text-gray-700">Max Torrent Size (MB):</label>
+                <input type="number" id="maxTorrentSize" value="4096" min="1"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="preferredLanguages" class="block text-sm font-medium text-gray-700">Preferred Languages (comma-separated, e.g., english,hindi,tamil):</label>
+                <input type="text" id="preferredLanguages" placeholder="english,hindi,tamil"
+                       class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+            </div>
+            <div>
+                <label for="sortBy" class="block text-sm font-medium text-gray-700">Sort By:</label>
+                <select id="sortBy"
+                        class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+                    <option value="seeders">Seeders</option>
+                    <option value="size">Size</option>
+                    <option value="recent">Recent</option>
+                </select>
+            </div>
+            <div>
+                <label for="sortOrder" class="block text-sm font-medium text-gray-700">Sort Order:</label>
+                <select id="sortOrder"
+                        class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+                    <option value="desc">Descending</option>
+                    <option value="asc">Ascending</option>
+                </select>
+            </div>
         </div>
 
-        <div class="section">
-            <h2 class="text-2xl font-bold mb-4">How to Configure:</h2>
-            <div class="config-block">
-                <p class="mb-2">The addon primarily reads its configuration from <strong>environment variables</strong>. Set these variables where your Node.js server is hosted (e.g., in a `.env` file for local development, or in your deployment environment settings).</p>
-                <p class="mb-4">Alternatively, you can configure these directly in Stremio's addon installation dialog, which will pass them as URL query parameters to the manifest endpoint.</p>
-                <h3 class="text-xl font-semibold mt-6 mb-2">Environment Variables:</h3>
-                <pre class="rounded-lg shadow-inner">
-JACKETT_URL=http://localhost:9117
-JACKETT_API_KEY=YOUR_JACKETT_API_KEY
-OMDB_API_KEY=YOUR_OMDB_API_KEY
-TMDB_API_KEY=YOUR_TMDB_API_KEY
-PREFERRED_RESOLUTIONS=2160p,1080p,720p
-PREFERRED_LANGUAGES=English,Hindi,Tamil
-MAX_RESULTS=50
-MAX_SIZE=0
-LOG_LEVEL=info
-PUBLIC_TRACKERS_URL=https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt
-FILTER_BY_SEEDERS=0
-SORT_BY=seeders
-                </pre>
-                <p class="text-sm text-gray-600 mt-2">Note: `MAX_SIZE` is in bytes (e.g., 5368709120 for 5GB). Set to `0` for no restriction.</p>
+        <div class="mt-8">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 text-center">Generated Environment Variables</h2>
+            <div class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                <pre id="envVarsOutput" class="text-sm text-gray-800 whitespace-pre-wrap"></pre>
+                <button onclick="copyToClipboard('envVarsOutput')"
+                        class="mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-md shadow-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-75">
+                    Copy Environment Variables
+                </button>
             </div>
         </div>
 
-        <div class="section">
-            <h2 class="text-2xl font-bold mb-4">Addon Installation:</h2>
-            <p class="mb-2">To install this addon in Stremio, copy the URL of your deployed addon and paste it into the addon search bar in Stremio (in the Addons section, scroll to the bottom).</p>
-            <p class="mb-2">Example URL (replace <code class="text-blue-700">YOUR_ADDON_HOST</code> with your actual host and port):</p>
-            <div class="config-block">
-                <code id="manifest-url" class="block bg-gray-200 p-2 rounded break-all text-sm font-semibold">http://YOUR_ADDON_HOST:7000/manifest.json</code>
+        <div class="mt-6">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4 text-center">Stremio Addon Manifest URL</h2>
+            <div class="bg-gray-50 p-4 rounded-md border border-gray-200">
+                <p id="manifestUrlOutput" class="text-sm text-gray-800 break-all"></p>
+                <button onclick="copyToClipboard('manifestUrlOutput')"
+                        class="mt-4 w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-md shadow-md focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-opacity-75">
+                    Copy Manifest URL
+                </button>
             </div>
-            <p class="text-sm text-gray-600 mt-2">Make sure your Node.js server is running and accessible from where you're running Stremio.</p>
         </div>
+
+        <p class="text-center text-gray-600 text-sm mt-8">
+            Run the addon locally: <code class="bg-gray-200 p-1 rounded">npm install && npm start</code>
+            Then, paste the Manifest URL into Stremio's addon settings.
+        </p>
     </div>
 
     <script>
-        document.addEventListener('DOMContentLoaded', async () => {
-            const configDisplay = document.getElementById('current-config');
-            const errorMessage = document.getElementById('error-message');
-            const manifestUrlElement = document.getElementById('manifest-url');
+        function generateConfig() {
+            const jackettHost = document.getElementById('jackettHost').value;
+            const jackettApiKey = document.getElementById('jackettApiKey').value;
+            const omdbApiKey = document.getElementById('omdbApiKey').value;
+            const tmdbApiKey = document.getElementById('tmdbApiKey').value;
+            const minSeeders = document.getElementById('minSeeders').value;
+            const maxStreams = document.getElementById('maxStreams').value;
+            const minTorrentSize = document.getElementById('minTorrentSize').value;
+            const maxTorrentSize = document.getElementById('maxTorrentSize').value;
+            const preferredLanguages = document.getElementById('preferredLanguages').value;
+            const sortBy = document.getElementById('sortBy').value;
+            const sortOrder = document.getElementById('sortOrder').value;
 
-            // Dynamically set the manifest URL based on the current host and port
-            const currentHost = window.location.hostname;
-            const currentPort = window.location.port || '7000'; // Default to 7000 if not specified
-            manifestUrlElement.textContent = `http://${currentHost}:${currentPort}/manifest.json`;
+            const envVars = `JACKETT_HOST=${jackettHost}
+JACKETT_API_KEY=${jackettApiKey}
+OMDB_API_KEY=${omdbApiKey}
+TMDB_API_KEY=${tmdbApiKey}
+MINIMUM_SEEDERS=${minSeeders}
+MAX_STREAMS=${maxStreams}
+MIN_TORRENT_SIZE_MB=${minTorrentSize}
+MAX_TORRENT_SIZE_MB=${maxTorrentSize}
+PREFERRED_LANGUAGES=${preferredLanguages}
+SORT_BY=${sortBy}
+SORT_ORDER=${sortOrder}`;
 
-            try {
-                const response = await fetch('/config');
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`);
-                }
-                const config = await response.json();
-                
-                let html = '<ul class="list-disc list-inside space-y-1">'; // Tailwind list styling
-                for (const key in config) {
-                    // Display API keys as hidden unless they are default placeholders
-                    if (key.includes('ApiKey') && config[key] !== 'YOUR_JACKETT_API_KEY' && config[key] !== 'YOUR_OMDB_API_KEY' && config[key] !== 'YOUR_TMDB_API_KEY') {
-                        html += `<li><strong>${key}:</strong> <span class="text-gray-500">******** (hidden)</span></li>`;
-                    } else if (Array.isArray(config[key])) {
-                        html += `<li><strong>${key}:</strong> ${config[key].join(', ')}</li>`;
-                    } else {
-                        html += `<li><strong>${key}:</strong> ${config[key]}</li>`;
-                    }
-                }
-                html += '</ul>';
-                configDisplay.innerHTML = html;
-                errorMessage.classList.add('hidden'); 
+            document.getElementById('envVarsOutput').textContent = envVars;
 
-            } catch (error) {
-                console.error('Failed to fetch configuration:', error);
-                configDisplay.innerHTML = 'Error loading configuration. Check your Node.js server console for more details.';
-                errorMessage.classList.remove('hidden'); 
+            // Generate Manifest URL (assuming addon runs on default port 7000)
+            const manifestUrl = `http://127.0.0.1:7000/manifest.json`;
+            document.getElementById('manifestUrlOutput').textContent = manifestUrl;
+        }
+
+        function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            let textToCopy = '';
+            if (element.tagName === 'PRE' || element.tagName === 'P') {
+                textToCopy = element.textContent;
+            } else if (element.tagName === 'INPUT') {
+                textToCopy = element.value;
             }
+
+            // Using execCommand for better iframe compatibility
+            const tempTextArea = document.createElement("textarea");
+            tempTextArea.value = textToCopy;
+            document.body.appendChild(tempTextArea);
+            tempTextArea.select();
+            try {
+                document.execCommand('copy');
+                alert("Copied to clipboard!"); // Use a custom modal in a real app, not alert
+            } catch (err) {
+                console.error('Failed to copy text', err);
+                alert("Failed to copy. Please copy manually."); // Use a custom modal
+            } finally {
+                document.body.removeChild(tempTextArea);
+            }
+        }
+
+        // Generate config on load and whenever an input changes
+        document.addEventListener('DOMContentLoaded', generateConfig);
+        document.querySelectorAll('input, select').forEach(element => {
+            element.addEventListener('input', generateConfig);
+            element.addEventListener('change', generateConfig); // For select elements
         });
     </script>
 </body>
