@@ -537,23 +537,30 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
   
   const yearMatches = (metadata.year && itemYearMatch) ? (parseInt(itemYearMatch, 10) === parseInt(metadata.year, 10)) : true;
 
+  // IMPORTANT: This validation logic applies AFTER Jackett has returned results.
+  // The querying strategy (which queries are sent to Jackett) is now what determines initial relevance.
+  // This validation acts as a final filter.
   if (wasIdQuery) {
-    // For ID-based queries, be very strict. Must contain ID OR a very strong title+year match.
+    // For content requested via IMDb/TMDB ID, we expect a strong match.
+    // It must either contain the ID or have a very strong title/year overlap.
     if (containsImdbId || containsTmdbId) {
-        // If ID is present, we still need some title overlap to avoid generic ID false positives.
-        // Or if no title metadata was resolved at all (e.g., obscure title).
-        if (hasStrongTitleOverlap || (!metadata.title && !metadata.akaTitles.length)) {
+        // If an ID is present in the torrent title, we'll generally consider it a good sign.
+        // We add `hasStrongTitleOverlap` as a secondary check to avoid cases like "tt1234567" appearing
+        // in a torrent for a completely different movie.
+        if (hasStrongTitleOverlap || (!metadata.title && !metadata.akaTitles.length)) { 
             passesTitleMatch = true;
             debugReason = `ID Query: Matched ID (${metadata.imdbId || metadata.tmdbId}) in torrent title.`;
         } else {
-            debugReason = `ID Query: ID present but insufficient title match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}".`;
+            // If ID is present but title is completely unrelated, it's probably junk
+            debugReason = `ID Query: ID present but insufficient title match for "${item.Title}".`;
         }
     } else if (hasStrongTitleOverlap && yearMatches) {
         // If no ID is found in the title, but there's a strong title+year match, still accept.
         passesTitleMatch = true;
         debugReason = `ID Query: Strong Title/AKA/Year Match (without explicit ID in torrent title) for "${metadata.title}" (${metadata.year}).`;
     } else {
-        debugReason = `ID Query: No ID match and insufficient title/year match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}".`;
+        // If neither ID nor strong title/year match, it's irrelevant for an ID query.
+        debugReason = `ID Query: No ID match and insufficient title/year match for "${item.Title}".`;
     }
 
     if (!passesTitleMatch) {
@@ -563,8 +570,7 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
         log.debug(`Validation passed: ${debugReason}`);
     }
 
-  } else { // Original query was title-based (e.g., from search box or catalog click without specific ID)
-    
+  } else { // Original query was title-based (e.g., from search bar or catalog click without specific ID)
     // For title-based queries, strict title/year match is paramount
     if (normalizedPrimaryTitle && metadata.year && normalizedItemTitle.includes(normalizedPrimaryTitle) && yearMatches) {
         passesTitleMatch = true;
@@ -592,7 +598,7 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
     }
     
     if (!passesTitleMatch) {
-        log.debug(`Validation failed: Title-based query, no sufficient title/year match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) / AKA Titles. (Reason: ${debugReason})`);
+        log.debug(`Validation failed: Title-based query, no sufficient title/year match for "${item.Title}". (Reason: ${debugReason})`);
         return false;
     } else {
         log.debug(`Validation passed: Title-based query match for "${item.Title}". (Reason: ${debugReason})`);
@@ -609,10 +615,10 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
   const passesSize = config.maxSize === 0 || itemSize <= config.maxSize;
   const passesResolution = config.preferredResolutions.length === 0 ||
                            config.preferredResolutions.includes(itemResolution) ||
-                           itemResolution === 'Unknown'; // Allow unknown if no specific preference
+                           itemResolution === 'Unknown'; 
   const passesLanguage = config.preferredLanguages.length === 0 ||
                          config.preferredLanguages.includes(itemLanguage) ||
-                         itemLanguage === 'Unknown'; // Allow unknown if no specific preference
+                         itemLanguage === 'Unknown'; 
 
   if (!passesSize) log.debug(`Validation failed: Size (${formatBytes(itemSize)}) exceeds max size (${formatBytes(config.maxSize)}) for "${item.Title}"`);
   if (!passesResolution) log.debug(`Validation failed: Resolution (${itemResolution}) not preferred for "${item.Title}" (Preferred: ${config.preferredResolutions.join(',')})`);
@@ -628,34 +634,36 @@ app.get('/manifest.json', (req, res) => {
   log.info('Manifest requested');
 
   // Update CURRENT_CONFIG based on query parameters from Stremio's config UI
+  // Use logical OR to ensure env variables are used if query params are missing (e.g., first load)
   const {
-      jackettHost = CURRENT_CONFIG.jackettUrl,
-      jackettApiKey = CURRENT_CONFIG.jackettApiKey,
-      omdbApiKey = CURRENT_CONFIG.omdbApiKey,
-      tmdbApiKey = CURRENT_CONFIG.tmdbApiKey,
-      preferredResolutions = CURRENT_CONFIG.preferredResolutions.join(','),
-      preferredLanguages = CURRENT_CONFIG.preferredLanguages.join(','),
-      maxResults = CURRENT_CONFIG.maxResults.toString(),
-      maxSize = CURRENT_CONFIG.maxSize.toString(),
-      logLevel = CURRENT_CONFIG.logLevel,
-      publicTrackersUrl = CURRENT_CONFIG.publicTrackersUrl,
-      filterBySeeders = CURRENT_CONFIG.filterBySeeders.toString(), 
-      sortBy = CURRENT_CONFIG.sortBy 
+      jackettHost = process.env.JACKETT_URL || CURRENT_CONFIG.jackettUrl,
+      jackettApiKey = process.env.JACKETT_API_KEY || CURRENT_CONFIG.jackettApiKey,
+      omdbApiKey = process.env.OMDB_API_KEY || CURRENT_CONFIG.omdbApiKey,
+      tmdbApiKey = process.env.TMDB_API_KEY || CURRENT_CONFIG.tmdbApiKey,
+      preferredResolutions, // Will be string from query, need to parse
+      preferredLanguages, // Will be string from query, need to parse
+      maxResults, // Will be string from query, need to parse
+      maxSize, // Will be string from query, need to parse
+      logLevel = process.env.LOG_LEVEL || CURRENT_CONFIG.logLevel,
+      publicTrackersUrl = process.env.PUBLIC_TRACKERS_URL || CURRENT_CONFIG.publicTrackersUrl,
+      filterBySeeders, // Will be string from query, need to parse
+      sortBy // Will be string from query, no parse needed
   } = req.query;
 
+  // Safely parse values, using CURRENT_CONFIG defaults if query parameter is empty/invalid
   CURRENT_CONFIG = {
       jackettUrl: jackettHost,
       jackettApiKey: jackettApiKey,
       omdbApiKey: omdbApiKey,
       tmdbApiKey: tmdbApiKey,
-      preferredResolutions: preferredResolutions.split(',').map(item => item.trim()).filter(Boolean),
-      preferredLanguages: preferredLanguages.split(',').map(item => item.trim()).filter(Boolean),
-      maxResults: parseInt(maxResults, 10),
-      maxSize: parseInt(maxSize, 10),
+      preferredResolutions: (preferredResolutions !== undefined ? preferredResolutions.split(',').map(item => item.trim()).filter(Boolean) : CURRENT_CONFIG.preferredResolutions),
+      preferredLanguages: (preferredLanguages !== undefined ? preferredLanguages.split(',').map(item => item.trim()).filter(Boolean) : CURRENT_CONFIG.preferredLanguages),
+      maxResults: parseInt(maxResults, 10) || CURRENT_CONFIG.maxResults,
+      maxSize: parseInt(maxSize, 10) || CURRENT_CONFIG.maxSize,
       logLevel: logLevel,
       publicTrackersUrl: publicTrackersUrl,
-      filterBySeeders: parseInt(filterBySeeders, 10),
-      sortBy: sortBy,
+      filterBySeeders: parseInt(filterBySeeders, 10) || CURRENT_CONFIG.filterBySeeders,
+      sortBy: sortBy || CURRENT_CONFIG.sortBy,
   };
 
   // Initial fetch of trackers with the potentially updated URL
@@ -663,9 +671,9 @@ app.get('/manifest.json', (req, res) => {
 
   res.json({
     id: 'community.stremio.jackettaddon.enhanced', 
-    version: '1.0.2', // Incremented version after bug fix
+    version: '1.0.3', // Incremented version after query strategy fix
     name: 'Jackett Enhanced Streams',
-    description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options.',
+    description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options. Prioritizes title-based searches for better relevance.',
     resources: ['catalog', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
@@ -759,9 +767,9 @@ app.get('/manifest.json', (req, res) => {
                 type: 'select',
                 title: 'Sort By',
                 options: [
+                    { value: 'score', label: 'Best Match Score' }, // Moved to top for default preference
                     { value: 'seeders', label: 'Most Seeders' },
-                    { value: 'publishAt', label: 'Recently Published' },
-                    { value: 'score', label: 'Best Match Score' } 
+                    { value: 'publishAt', label: 'Recently Published' }
                 ],
                 required: false,
                 default: CURRENT_CONFIG.sortBy
@@ -834,25 +842,43 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
     return res.json({ metas: [] });
   }
 
-  // Combine query methods for robustness in catalog search
-  let queries = [jackettSearchQuery];
-  if (metadataForValidation.imdbId) queries.push(metadataForValidation.imdbId);
-  if (metadataForValidation.tmdbId) queries.push(metadataForValidation.tmdbId.toString());
+  // Build query list for catalog, prioritizing title/aka over direct ID for query to Jackett
+  let queries = [];
+  if (metadataForValidation.title) {
+      queries.push(metadataForValidation.title);
+      if (metadataForValidation.year) {
+          queries.push(`${metadataForValidation.title} ${metadataForValidation.year}`);
+      }
+  }
   if (metadataForValidation.akaTitles && metadataForValidation.akaTitles.length > 0) {
-      queries = queries.concat(metadataForValidation.akaTitles);
+      metadataForValidation.akaTitles.forEach(akaTitle => {
+          queries.push(akaTitle);
+          if (metadataForValidation.year) {
+              queries.push(`${akaTitle} ${metadataForValidation.year}`);
+          }
+      });
+  }
+  // Fallback to direct ID only if no strong title was resolved
+  if (!metadataForValidation.title && metadataForValidation.imdbId) {
+      queries.push(metadataForValidation.imdbId);
+  }
+  if (!metadataForValidation.title && metadataForValidation.tmdbId) {
+      queries.push(metadataForValidation.tmdbId.toString());
   }
   queries = [...new Set(queries.filter(q => q && q.trim() !== ''))]; 
 
   let allJackettResults = [];
   for (const q of queries) {
       try {
-          const params = { ...jackettSearchParams, q: q };
+          const params = { cat: jackettSearchParams.cat, q: q }; // Always use 'q' for general search
+          // Only add imdbid/tmdbid if the query itself is the ID, not for title queries
           if (q.startsWith('tt')) params.imdbid = q; 
-          if (q.startsWith('tmdb')) params.tmdbid = q.substring(4); 
+          if (q.match(/^\d+$/) && q.length > 5) params.tmdbid = q; // Simple numeric check for TMDB ID
           
           const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_CATALOG_FETCH_LIMIT);
           if (jackettResponse && jackettResponse.Results) {
               allJackettResults = allJackettResults.concat(jackettResponse.Results);
+              if (allJackettResults.length >= JACKETT_CATALOG_FETCH_LIMIT) break; // Stop if we have enough raw results
           }
       } catch (error) {
           log.warn(`Error during catalog Jackett search for "${q}": ${error.message}`);
@@ -862,7 +888,6 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   // Deduplicate all results
   const seenGuids = new Set();
   allJackettResults = allJackettResults.filter(item => {
-      // Use MagnetUri as a proxy for GUID if GUID is not reliably present or unique in Jackett XML
       const uniqueIdentifier = item.guid || item.MagnetUri; 
       if (seenGuids.has(uniqueIdentifier)) { 
           return false;
@@ -902,17 +927,17 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
       // Sort results based on user config and new scoring for catalog
       processedLinks = resultsWithScore.sort((a, b) => {
-        // 1. Sort by Match Score (highest first) if sortBy is 'score'
-        if (config.sortBy === 'score' && b.score !== a.score) {
-            return b.score - a.score;
+        // 1. Sort by Score (highest first) if sortBy is 'score'
+        if (config.sortBy === 'score') {
+            if (b.score !== a.score) return b.score - a.score;
         }
         // 2. Then by seeders (more seeders first) if sortBy is 'seeders'
-        if (config.sortBy === 'seeders' && b.originalSeeders !== a.originalSeeders) {
-          return b.originalSeeders - a.originalSeeders;
+        if (config.sortBy === 'seeders') {
+          if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
         }
         // 3. Then by PublishDate (latest first) if sortBy is 'publishAt'
-        if (config.sortBy === 'publishAt' && a.publishDate.getTime() !== b.publishDate.getTime()) {
-          return b.publishDate.getTime() - a.publishDate.getTime();
+        if (config.sortBy === 'publishAt') {
+          if (b.publishDate.getTime() !== a.publishDate.getTime()) return b.publishDate.getTime() - a.publishDate.getTime();
         }
         // Fallback sorting: Score, then Seeders, then PublishDate
         if (b.score !== a.score) return b.score - a.score;
@@ -975,76 +1000,82 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     metadata.imdbId = baseImdbId; 
     wasIdQuery = true; 
 
-    // --- Prioritized Jackett Queries ---
-    // 1. Try IMDB ID search first
-    if (metadata.imdbId) {
-        log.debug(`Attempting Jackett search by IMDB ID: ${metadata.imdbId}`);
-        try {
-            const params = { imdbid: metadata.imdbId, cat: category };
-            if (season) params.season = season;
-            if (episode) params.ep = episode;
-            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-            if (jackettResponse && jackettResponse.Results && jackettResponse.Results.length > 0) {
-                allJackettResults = allJackettResults.concat(jackettResponse.Results);
-                log.debug(`Found ${jackettResponse.Results.length} results via IMDB ID.`);
-            } else {
-                log.debug(`No direct results for IMDB ID ${metadata.imdbId}.`);
-            }
-        } catch (error) {
-            log.warn(`Error during IMDB ID search for ${metadata.imdbId}: ${error.message}`);
-        }
-    }
+    // --- PRIORITIZED JACKETT QUERIES (Revised Strategy) ---
+    let queriesToTry = [];
+    const maxRelevantResultsThreshold = Math.max(config.maxResults, 10); // Stop if we get a decent number of relevant results
 
-    // 2. If not enough results, try TMDB ID search (if available)
-    if (allJackettResults.length < config.maxResults && metadata.tmdbId) {
-        log.debug(`Attempting Jackett search by TMDB ID: ${metadata.tmdbId}`);
-        try {
-            const params = { tmdbid: metadata.tmdbId, cat: category };
-            if (season) params.season = season;
-            if (episode) params.ep = episode;
-            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
-            if (jackettResponse && jackettResponse.Results && jackettResponse.Results.length > 0) {
-                allJackettResults = allJackettResults.concat(jackettResponse.Results);
-                log.debug(`Found ${jackettResponse.Results.length} results via TMDB ID.`);
-            } else {
-                log.debug(`No direct results for TMDB ID ${metadata.tmdbId}.`);
-            }
-        } catch (error) {
-            log.warn(`Error during TMDB ID search for ${metadata.tmdbId}: ${error.message}`);
-        }
-    }
-
-    // 3. Fallback to title-based search if still not enough results or no IDs available
-    if (allJackettResults.length < config.maxResults && metadata.title) {
-        log.debug(`Falling back to title-based Jackett search for "${metadata.title}"`);
-        let titleQueries = [];
-        // Prioritize queries with season/episode for series
+    // 1. Primary Title + Year (for both movies and series)
+    if (metadata.title && metadata.year) {
+        queriesToTry.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
         if (type === 'series' && season && episode) {
-            titleQueries.push(`${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
-            titleQueries.push(`${metadata.title} Season ${season} Episode ${episode}`);
+            queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
+            queriesToTry.push({ q: `${metadata.title} Season ${season} Episode ${episode}`, cat: category });
         }
-        if (metadata.year) {
-            titleQueries.push(`${metadata.title} ${metadata.year}`);
+    }
+    // 2. Primary Title only
+    if (metadata.title) {
+        queriesToTry.push({ q: metadata.title, cat: category });
+        if (type === 'series' && season && episode) {
+            queriesToTry.push({ q: `${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
         }
-        titleQueries.push(metadata.title);
-        
-        if (metadata.akaTitles && metadata.akaTitles.length > 0) {
-            metadata.akaTitles.forEach(akaTitle => {
+    }
+    // 3. Alternative Titles + Year
+    if (metadata.akaTitles && metadata.akaTitles.length > 0) {
+        metadata.akaTitles.forEach(akaTitle => {
+            if (metadata.year) {
+                queriesToTry.push({ q: `${akaTitle} ${metadata.year}`, cat: category });
                 if (type === 'series' && season && episode) {
-                    titleQueries.push(`${akaTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
+                    queriesToTry.push({ q: `${akaTitle} ${metadata.year} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
                 }
-                if (metadata.year) {
-                    titleQueries.push(`${akaTitle} ${metadata.year}`);
-                }
-                titleQueries.push(akaTitle);
-            });
-        }
-        
-        titleQueries = [...new Set(titleQueries.filter(q => q && q.trim() !== ''))]; 
+            }
+            // 4. Alternative Titles only
+            queriesToTry.push({ q: akaTitle, cat: category });
+            if (type === 'series' && season && episode) {
+                queriesToTry.push({ q: `${akaTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`, cat: category });
+            }
+        });
+    }
 
-        for (const q of titleQueries) {
+    // Deduplicate query objects to avoid redundant API calls
+    const uniqueQueries = [];
+    const seenQueryStrings = new Set();
+    for (const query of queriesToTry) {
+        const queryString = JSON.stringify(query); 
+        if (!seenQueryStrings.has(queryString)) {
+            uniqueQueries.push(query);
+            seenQueryStrings.add(queryString);
+        }
+    }
+
+    // Execute title-based queries first
+    for (const queryParams of uniqueQueries) {
+        // Stop if we have enough raw results or if the number of relevant results is already good
+        if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT || 
+            allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length >= maxRelevantResultsThreshold) {
+            log.debug(`Stopping title-based queries. Enough raw results or relevant results already found.`);
+            break;
+        }
+
+        try {
+            const jackettResponse = await fetchJackettResults(queryParams, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+            if (jackettResponse && jackettResponse.Results) {
+                allJackettResults = allJackettResults.concat(jackettResponse.Results);
+            }
+        } catch (error) {
+            log.warn(`Failed to fetch Jackett results for title query ${JSON.stringify(queryParams)}: ${error.message}`);
+        }
+    }
+
+    // 5. Fallback to ID-based search if title-based searches were insufficient
+    //    Only if we haven't already hit our overall max fetch limit and don't have enough relevant results
+    if (allJackettResults.length < JACKETT_STREAM_FETCH_LIMIT && 
+        allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length < maxRelevantResultsThreshold) {
+        
+        // Try IMDB ID search directly
+        if (metadata.imdbId) {
+            log.debug(`Falling back to Jackett search by IMDB ID: ${metadata.imdbId}`);
             try {
-                const params = { q: q, cat: category };
+                const params = { imdbid: metadata.imdbId, cat: category };
                 if (type === 'series' && season && episode) {
                     params.season = season;
                     params.ep = episode;
@@ -1052,22 +1083,41 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                 const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
                 if (jackettResponse && jackettResponse.Results) {
                     allJackettResults = allJackettResults.concat(jackettResponse.Results);
-                    if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT) { 
-                        log.debug(`Reached stream fetch limit (${JACKETT_STREAM_FETCH_LIMIT}) during title fallback.`);
-                        break;
-                    }
                 }
             } catch (error) {
-                log.warn(`Failed to fetch Jackett results for fallback query "${q}": ${error.message}`);
+                log.warn(`Error during fallback IMDB ID search for ${metadata.imdbId}: ${error.message}`);
             }
         }
     }
 
-    // Ensure there's at least one query even if metadata lookup and specific ID searches fail
-    if (allJackettResults.length === 0 && (!metadata.imdbId && !metadata.tmdbId && !metadata.title)) {
-        log.warn(`No specific metadata found for IMDB ID ${baseImdbId}. Falling back to using IMDB ID as general query.`);
+    if (allJackettResults.length < JACKETT_STREAM_FETCH_LIMIT && 
+        allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length < maxRelevantResultsThreshold) {
+        // Try TMDB ID search directly
+        if (metadata.tmdbId) {
+            log.debug(`Falling back to Jackett search by TMDB ID: ${metadata.tmdbId}`);
+            try {
+                const params = { tmdbid: metadata.tmdbId, cat: category };
+                if (type === 'series' && season && episode) {
+                    params.season = season;
+                    params.ep = episode;
+                }
+                const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+                if (jackettResponse && jackettResponse.Results) {
+                    allJackettResults = allJackettResults.concat(jackettResponse.Results);
+                }
+            } catch (error) {
+                log.warn(`Error during fallback TMDB ID search for ${metadata.tmdbId}: ${error.message}`);
+            }
+        }
+    }
+    
+    // Final check/fallback: Original Stremio ID as a raw query if nothing else worked
+    if (allJackettResults.length < JACKETT_STREAM_FETCH_LIMIT && 
+        allJackettResults.filter(item => validateJackettResult(item, metadata, wasIdQuery, config)).length < maxRelevantResultsThreshold &&
+        id && id.trim() !== '' && !id.startsWith('jackett:')) { 
+        log.warn(`Still not enough results. Final fallback: using original Stremio ID "${id}" as general query.`);
         try {
-            const params = { q: baseImdbId, cat: category };
+            const params = { q: id, cat: category };
             if (type === 'series' && season && episode) {
                 params.season = season;
                 params.ep = episode;
@@ -1077,7 +1127,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                 allJackettResults = allJackettResults.concat(jackettResponse.Results);
             }
         } catch (error) {
-            log.warn(`Error during final fallback IMDB ID as query: ${error.message}`);
+            log.warn(`Error during final fallback using raw Stremio ID as query: ${error.message}`);
         }
     }
 
@@ -1179,4 +1229,5 @@ app.listen(PORT, () => {
   log.info(`Public Trackers URL: ${CURRENT_CONFIG.publicTrackersUrl}`);
   log.info(`Logging Level: ${CURRENT_CONFIG.logLevel}`);
 });
+
 
