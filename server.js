@@ -36,6 +36,13 @@ let CURRENT_CONFIG = {
   sortBy: process.env.SORT_BY || 'seeders', // New: Configurable sort order
 };
 
+// Jackett Category mappings based on content type - MOVED TO GLOBAL SCOPE
+const JACKETT_CATEGORIES = {
+  movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
+  series: '5000,5030,5040,5045,105000,105040,105030,105045'
+};
+
+
 // --- Simple Logging Utility ---
 const LOG_LEVELS = {
   debug: 0,
@@ -104,8 +111,8 @@ const fetchAndCachePublicTrackers = async (publicTrackersUrl) => {
   }
 };
 
-// Schedule periodic refresh of public trackers (initial call will happen with the first request)
-// setInterval(fetchAndCachePublicTrackers, TRACKER_CACHE_TTL); // This will be called on demand via config update
+// Initial fetch on startup (will be triggered once manifest is requested and config is set)
+// No need to call setInterval here, it will be handled on config update.
 
 /**
  * Normalizes a string for comparison by converting to lowercase,
@@ -187,7 +194,9 @@ const enrichMagnetUri = (magnetUri) => {
     const existingTrackers = url.searchParams.getAll('tr');
     // Use the current cached trackers for enrichment
     const trackersToUse = cachedPublicTrackers;
-    const newTrackers = trackersToUse.filter(tracker => !existingTrackers.includes(tracker));
+    const newTrackers = trackersToUse.filter(tracker => !existingTrackers.includes(`tracker:${tracker}`)); // Filter out existing trackers
+    
+    // Add new trackers to the URL's search parameters directly
     newTrackers.forEach(tracker => url.searchParams.append('tr', tracker));
     return url.toString();
   } catch (error) {
@@ -217,7 +226,7 @@ const formatBytes = (bytes) => {
  * @returns {Promise<object>} An object containing metadata like title, year, akaTitles, tmdbId.
  */
 const fetchMetadataFromOmdbTmdb = async (imdbId, omdbApiKey, tmdbApiKey) => {
-  let metadata = { title: null, year: null, akaTitles: [], tmdbId: null, imdbId: imdbId }; // Add imdbId to metadata
+  let metadata = { title: null, year: null, akaTitles: [], tmdbId: null, imdbId: imdbId }; 
   
   // 1. Try OMDB first
   if (omdbApiKey && omdbApiKey !== 'YOUR_OMDB_API_KEY') {
@@ -230,8 +239,6 @@ const fetchMetadataFromOmdbTmdb = async (imdbId, omdbApiKey, tmdbApiKey) => {
         metadata.title = omdbData.Title;
         metadata.year = omdbData.Year;
         log.debug(`OMDB metadata found: ${JSON.stringify(metadata)}`);
-        // OMDB doesn't typically provide 'aka titles' directly in a structured way for search,
-        // so we'll still attempt TMDB for alternative titles if needed or if OMDB is not enough.
       } else {
         log.warn(`OMDB did not return valid data for ${imdbId}: ${omdbData.Error || 'Unknown error'}`);
       }
@@ -277,7 +284,7 @@ const fetchMetadataFromOmdbTmdb = async (imdbId, omdbApiKey, tmdbApiKey) => {
         const tmdbAltTitlesData = await tmdbAltTitlesResponse.json();
         if (tmdbAltTitlesData.results) {
           // Filter to only include titles in English or the original language, and avoid duplicates
-          const uniqueAltTitles = new Set(metadata.akaTitles); // Add existing ones
+          const uniqueAltTitles = new Set(metadata.akaTitles); 
           tmdbAltTitlesData.results.forEach(t => {
             // Include titles that are 'default' or in 'en' language, or are different from the primary title
             if (t.title && t.title !== metadata.title && (t.iso_3166_1 === 'US' || t.iso_3166_1 === 'GB' || t.iso_3166_1 === 'null')) {
@@ -415,7 +422,7 @@ const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
 
     // Prepare sources: existing announces from parsed torrent + enriched trackers
     const existingSources = (parsedTorrent.announce || []).map(x => `tracker:${x}`);
-    const newTrackers = currentTrackers.filter(tracker => !existingSources.includes(`tracker:${tracker}`)); // Avoid adding duplicates
+    const newTrackers = currentTrackers.filter(tracker => !existingSources.includes(`tracker:${tracker}`)); // Filter out existing trackers
     
     const allSources = [...new Set([...existingSources, ...newTrackers.map(t => `tracker:${t}`), `dht:${infoHash}`])];
 
@@ -632,8 +639,8 @@ app.get('/manifest.json', (req, res) => {
       maxSize = CURRENT_CONFIG.maxSize.toString(),
       logLevel = CURRENT_CONFIG.logLevel,
       publicTrackersUrl = CURRENT_CONFIG.publicTrackersUrl,
-      filterBySeeders = CURRENT_CONFIG.filterBySeeders.toString(), // New config
-      sortBy = CURRENT_CONFIG.sortBy // New config
+      filterBySeeders = CURRENT_CONFIG.filterBySeeders.toString(), 
+      sortBy = CURRENT_CONFIG.sortBy 
   } = req.query;
 
   CURRENT_CONFIG = {
@@ -654,15 +661,9 @@ app.get('/manifest.json', (req, res) => {
   // Initial fetch of trackers with the potentially updated URL
   fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
 
-  // Jackett Category mappings based on content type
-  const JACKETT_CATEGORIES = {
-    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
-    series: '5000,5030,5040,5045,105000,105040,105030,105045'
-  };
-
   res.json({
-    id: 'community.stremio.jackettaddon.enhanced', // Changed ID for clarity
-    version: '1.0.1', // Incremented version
+    id: 'community.stremio.jackettaddon.enhanced', 
+    version: '1.0.2', // Incremented version after bug fix
     name: 'Jackett Enhanced Streams',
     description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options.',
     resources: ['catalog', 'stream'],
@@ -682,7 +683,7 @@ app.get('/manifest.json', (req, res) => {
       },
     ],
     idPrefixes: ['tt'], 
-    logo: 'https://placehold.co/256x256/007bff/ffffff?text=JE', // Placeholder logo
+    logo: 'https://placehold.co/256x256/007bff/ffffff?text=JE', 
     behaviorHints: {
         configurable: true,
         configuration: [
@@ -760,7 +761,7 @@ app.get('/manifest.json', (req, res) => {
                 options: [
                     { value: 'seeders', label: 'Most Seeders' },
                     { value: 'publishAt', label: 'Recently Published' },
-                    { value: 'score', label: 'Best Match Score' } // New sorting option
+                    { value: 'score', label: 'Best Match Score' } 
                 ],
                 required: false,
                 default: CURRENT_CONFIG.sortBy
@@ -799,14 +800,13 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
   log.info(`Catalog requested: Type=${type}, ID=${id}, Search=${search}, Skip=${skip}`);
 
-  // Re-read config for this request, as it might have been updated via manifest
   const config = { ...CURRENT_CONFIG }; 
 
   let jackettSearchQuery = search;
-  let jackettSearchParams = { cat: JACKETT_CATEGORIES[type] }; // Use new category mapping
+  let jackettSearchParams = { cat: JACKETT_CATEGORIES[type] }; 
   let metadataForValidation = {};
   let wasIdQueryForValidation = false; 
-  const JACKETT_CATALOG_FETCH_LIMIT = 100; // Fetch more for catalog to allow better filtering
+  const JACKETT_CATALOG_FETCH_LIMIT = 100; 
 
   if (id.startsWith('tt') && !search) { 
     log.debug(`IMDB ID detected for catalog: ${id}. Attempting metadata lookup for initial search query.`);
@@ -841,14 +841,14 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   if (metadataForValidation.akaTitles && metadataForValidation.akaTitles.length > 0) {
       queries = queries.concat(metadataForValidation.akaTitles);
   }
-  queries = [...new Set(queries.filter(q => q && q.trim() !== ''))]; // Deduplicate and clean
+  queries = [...new Set(queries.filter(q => q && q.trim() !== ''))]; 
 
   let allJackettResults = [];
   for (const q of queries) {
       try {
           const params = { ...jackettSearchParams, q: q };
-          if (q.startsWith('tt')) params.imdbid = q; // If query itself is an IMDB ID
-          if (q.startsWith('tmdb')) params.tmdbid = q.substring(4); // Simple tmdb ID
+          if (q.startsWith('tt')) params.imdbid = q; 
+          if (q.startsWith('tmdb')) params.tmdbid = q.substring(4); 
           
           const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_CATALOG_FETCH_LIMIT);
           if (jackettResponse && jackettResponse.Results) {
@@ -862,10 +862,12 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
   // Deduplicate all results
   const seenGuids = new Set();
   allJackettResults = allJackettResults.filter(item => {
-      if (seenGuids.has(item.MagnetUri)) { // Using MagnetUri as a proxy for GUID if not available
+      // Use MagnetUri as a proxy for GUID if GUID is not reliably present or unique in Jackett XML
+      const uniqueIdentifier = item.guid || item.MagnetUri; 
+      if (seenGuids.has(uniqueIdentifier)) { 
           return false;
       }
-      seenGuids.add(item.MagnetUri);
+      seenGuids.add(uniqueIdentifier);
       return true;
   });
 
@@ -940,7 +942,6 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   log.info(`Stream requested: Type=${type}, ID=${id}`);
 
-  // Re-read config for this request, as it might have been updated via manifest
   const config = { ...CURRENT_CONFIG }; 
 
   if (!config.jackettUrl || config.jackettApiKey === 'YOUR_JACKETT_API_KEY') {
@@ -950,22 +951,14 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   let metadata = {};
   let allJackettResults = [];
-  const category = JACKETT_CATEGORIES[type]; // Make sure JACKETT_CATEGORIES is defined globally or derived
+  const category = JACKETT_CATEGORIES[type]; 
   let wasIdQuery = false; 
-  const JACKETT_STREAM_FETCH_LIMIT = 200; // Fetch more for streams to get best options
+  const JACKETT_STREAM_FETCH_LIMIT = 200; 
 
-  // Define JACKETT_CATEGORIES here as it's used directly in the stream endpoint
-  const JACKETT_CATEGORIES = {
-    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
-    series: '5000,5030,5040,5045,105000,105040,105030,105045'
-  };
-
-
-  let baseImdbId = id.split(':')[0]; // Extract base IMDb ID from Stremio's ID
+  let baseImdbId = id.split(':')[0]; 
   let season = null;
   let episode = null;
 
-  // For series, try to extract season and episode
   if (type === 'series') {
       const parts = id.split(':');
       if (parts.length >= 3) {
@@ -1047,12 +1040,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
             });
         }
         
-        titleQueries = [...new Set(titleQueries.filter(q => q && q.trim() !== ''))]; // Deduplicate and clean
+        titleQueries = [...new Set(titleQueries.filter(q => q && q.trim() !== ''))]; 
 
         for (const q of titleQueries) {
             try {
                 const params = { q: q, cat: category };
-                // Add season/ep to query params for general search if available
                 if (type === 'series' && season && episode) {
                     params.season = season;
                     params.ep = episode;
@@ -1060,7 +1052,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
                 const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
                 if (jackettResponse && jackettResponse.Results) {
                     allJackettResults = allJackettResults.concat(jackettResponse.Results);
-                    if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT) { // Stop fetching if we have enough raw results
+                    if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT) { 
                         log.debug(`Reached stream fetch limit (${JACKETT_STREAM_FETCH_LIMIT}) during title fallback.`);
                         break;
                     }
@@ -1107,10 +1099,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   // Deduplicate all results again after merging from multiple queries
   const finalSeenGuids = new Set();
   allJackettResults = allJackettResults.filter(item => {
-      if (finalSeenGuids.has(item.MagnetUri)) { 
+      const uniqueIdentifier = item.guid || item.MagnetUri; 
+      if (finalSeenGuids.has(uniqueIdentifier)) { 
           return false;
       }
-      finalSeenGuids.add(item.MagnetUri);
+      finalSeenGuids.add(uniqueIdentifier);
       return true;
   });
 
