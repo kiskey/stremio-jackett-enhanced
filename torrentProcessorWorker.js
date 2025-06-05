@@ -1,9 +1,20 @@
 // torrentProcessorWorker.js
 const { parentPort } = require('worker_threads');
-const get = require('lodash.get'); // lodash.get is still useful for safe property access
+const { performance } = require('perf_hooks'); // Import performance for timing in worker
 
-// Re-declare utility functions that will be used by the worker
-// These need to be passed or re-defined in the worker's scope
+// Simple 'get' helper function for safer property access without external dependency
+const simpleGet = (obj, path, defaultValue) => {
+    const parts = path.split('.');
+    let current = obj;
+    for (let i = 0; i < parts.length; i++) {
+        if (current === null || typeof current !== 'object' || !current.hasOwnProperty(parts[i])) {
+            return defaultValue;
+        }
+        current = current[parts[i]];
+    }
+    return current !== undefined ? current : defaultValue;
+};
+
 // Configuration values will be received via postMessage
 let MINIMUM_SEEDERS;
 let MIN_TORRENT_SIZE_MB;
@@ -12,7 +23,7 @@ let PREFERRED_LANGUAGES;
 let PREFERRED_VIDEO_QUALITIES_CONFIG;
 let PREFERRED_AUDIO_QUALITIES_CONFIG;
 
-// --- Utility Functions for Validation, Parsing, and Filtering (copied from server.js) ---
+// --- Utility Functions for Validation, Parsing, and Filtering ---
 
 /**
  * Sanitizes and standardizes a title for robust comparison.
@@ -42,16 +53,22 @@ function standardizeTitle(title) {
     // Convert to lowercase
     let standardized = title.toLowerCase();
 
-    // Remove common special characters, punctuation, and symbols
-    standardized = standardized.replace(/[.,/#!$%^&*;:{}=\-_`~()\[\]]/g, ' ');
+    // Remove common special characters, punctuation, and symbols more comprehensively
+    standardized = standardized.replace(/[^\w\s]/g, ' '); // Keep only alphanumeric and spaces
 
-    // Replace multiple spaces with a single space and trim
-    standardized = standardized.replace(/\s+/g, ' ').trim();
+    // Replace common separators with a single space and trim
+    standardized = standardized.replace(/[\s\.\-]+/g, ' ').trim();
 
-    // Remove common release group tags and other extraneous info that might confuse validation
-    standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2})\b/g, ' ');
+    // Remove common release group tags, quality tags, and other extraneous info
+    // This regex is extended based on observed patterns in torrent titles
+    standardized = standardized.replace(/(hdrip|webrip|web-dl|x264|x265|h264|h265|aac|ac3|dts|bluray|dvdrip|brrip|bdrip|repack|proper|internal|ita|eng|dubbed|subbed|multi|german|french|spanish|hindi|tamil|korean|japanese|chinese|kannada|malayalam|telugu|720p|1080p|2160p|4k|uhd|fhd|mp4|mkv|avi|xvid|hevc|remux|extended|director's cut|uncut|unrated|s\d{2}e\d{2}|s\d{2}|e\d{2}|freeleech|true|ddp|hdr|dts-hd|ma|atmos|xvid|av1|rip|by|rg|uh|etrg|ethd|t0m|war|din|hurtom|rutracker|subs)\b/g, ' ');
 
-    // Again, replace multiple spaces with a single space and trim
+    // Remove year if it's still present and surrounded by spaces
+    if (extractedYear) {
+        standardized = standardized.replace(new RegExp(`\\s${extractedYear}\\s`, 'g'), ' ');
+    }
+
+    // Final clean up: replace multiple spaces with a single space and trim
     standardized = standardized.replace(/\s+/g, ' ').trim();
 
     return { standardizedTitle: standardized, extractedYear: extractedYear };
@@ -67,7 +84,6 @@ function standardizeTitle(title) {
  */
 function validateTorrentTitle(metadata, season, episode, torrentTitle) {
     if (!metadata || !metadata.title) {
-        // In worker, we might not log this as intensely, or return a specific status
         return false;
     }
 
@@ -106,15 +122,19 @@ function getTorrentLanguage(torrentTitle) {
         'tam': 'tamil', 'tamil': 'tamil',
         'mal': 'malayalam', 'malayalam': 'malayalam',
         'kan': 'kannada', 'kannada': 'kannada',
+        'tel': 'telugu', 'telugu': 'telugu',
         'chn': 'chinese', 'chinese': 'chinese',
         'kor': 'korean', 'korean': 'korean',
         'spa': 'spanish', 'spanish': 'spanish',
         'ger': 'german', 'german': 'german',
         'jpn': 'japanese', 'japanese': 'japanese',
+        'ukr': 'ukrainian', 'ukrainian': 'ukrainian', // Added based on sample
+        'ita': 'italian', 'italian': 'italian',     // Added based on sample
+        'fre': 'french', 'french': 'french',       // Added based on sample
     };
 
     for (const key in languageMap) {
-        if (lowerTitle.includes(key)) {
+        if (lowerTitle.includes(key) || lowerTitle.includes(languageMap[key])) {
             return languageMap[key];
         }
     }
@@ -142,31 +162,31 @@ function parseTorrentDetails(torrentTitle) {
         }
     }
 
-    // Video Quality: e.g., web-dl, bluray, remux, hdtv, webrip, hdrip, x264, x265, hevc, hdr
-    const videoQualityMatches = lowerTitle.match(/(remux|bluray|web-dl|webrip|hdrip|hdtv|dvdrip|x264|x265|hevc|hdr)/g);
+    // Video Quality: e.g., remux, bluray, web-dl, webrip, hdrip, hdtv, dvdrip, x264, x265, hevc, hdr, bdrip, xvid, av1
+    const videoQualityMatches = lowerTitle.match(/(remux|bluray|bdrip|web-dl|webrip|hdrip|hdtv|dvdrip|x264|x265|hevc|hdr|xvid|av1)/g);
     if (videoQualityMatches) {
         for (const prefQuality of PREFERRED_VIDEO_QUALITIES_CONFIG) {
             if (videoQualityMatches.includes(prefQuality)) {
                 videoQuality = prefQuality;
-                break;
+                break; // Found preferred, take it
             }
         }
         if (!videoQuality && videoQualityMatches.length > 0) {
-            videoQuality = videoQualityMatches[0];
+            videoQuality = videoQualityMatches[0]; // Fallback to first found if no preference match
         }
     }
 
-    // Audio Quality: e.g., dts-hd, truehd, atmos, dts, ac3, aac, mp3
-    const audioQualityMatches = lowerTitle.match(/(truehd|dts-hd|atmos|dd\+?5\.1|dd\+?7\.1|ac3|aac|mp3)/g);
+    // Audio Quality: e.g., truehd, dts-hd, atmos, dts, ac3, aac, mp3, eac3, ddp
+    const audioQualityMatches = lowerTitle.match(/(truehd|dts-hd|atmos|dts|eac3|ddp|ac3|aac|mp3|dd\+?5\.1|dd\+?7\.1)/g);
     if (audioQualityMatches) {
         for (const prefQuality of PREFERRED_AUDIO_QUALITIES_CONFIG) {
             if (audioQualityMatches.includes(prefQuality)) {
                 audioQuality = prefQuality;
-                break;
+                break; // Found preferred, take it
             }
         }
         if (!audioQuality && audioQualityMatches.length > 0) {
-            audioQuality = audioQualityMatches[0];
+            audioQuality = audioQualityMatches[0]; // Fallback to first found
         }
     }
 
@@ -183,8 +203,9 @@ function getResolutionRank(resolution) {
         case '2160p': return 4;
         case '1080p': return 3;
         case '720p': return 2;
+        case '576p': // Example from sample
         case '480p': return 1;
-        default: return 0;
+        default: return 0; // Unknown or not found
     }
 }
 
@@ -196,7 +217,7 @@ function getResolutionRank(resolution) {
 function getVideoQualityRank(quality) {
     if (!quality) return 0;
     const index = PREFERRED_VIDEO_QUALITIES_CONFIG.indexOf(quality);
-    return index !== -1 ? PREFERRED_VIDEO_QUALITIES_CONFIG.length - index : 0;
+    return index !== -1 ? PREFERRED_VIDEO_QUALITIES_CONFIG.length - index : 0; // Higher rank for earlier preferred qualities
 }
 
 /**
@@ -207,75 +228,97 @@ function getVideoQualityRank(quality) {
 function getAudioQualityRank(quality) {
     if (!quality) return 0;
     const index = PREFERRED_AUDIO_QUALITIES_CONFIG.indexOf(quality);
-    return index !== -1 ? PREFERRED_AUDIO_QUALITIES_CONFIG.length - index : 0;
+    return index !== -1 ? PREFERRED_AUDIO_QUALITIES_CONFIG.length - index : 0; // Higher rank for earlier preferred qualities
 }
 
 // Listen for messages from the main thread
 parentPort.on('message', (message) => {
-    const { jackettResults, metadata, season, episode, config, publicTrackers } = message;
+    const workerStartTime = performance.now();
+    try {
+        const { jackettResults, metadata, season, episode, config, publicTrackers } = message;
 
-    // Set worker's config from the received message
-    MINIMUM_SEEDERS = config.MINIMUM_SEEDERS;
-    MIN_TORRENT_SIZE_MB = config.MIN_TORRENT_SIZE_MB;
-    MAX_TORRENT_SIZE_MB = config.MAX_TORRENT_SIZE_MB;
-    PREFERRED_LANGUAGES = config.PREFERRED_LANGUAGES;
-    PREFERRED_VIDEO_QUALITIES_CONFIG = config.PREFERRED_VIDEO_QUALITIES_CONFIG;
-    PREFERRED_AUDIO_QUALITIES_CONFIG = config.PREFERRED_AUDIO_QUALITIES_CONFIG;
+        // Set worker's config from the received message
+        MINIMUM_SEEDERS = config.MINIMUM_SEEDERS;
+        MIN_TORRENT_SIZE_MB = config.MIN_TORRENT_SIZE_MB;
+        MAX_TORRENT_SIZE_MB = config.MAX_TORRENT_SIZE_MB;
+        PREFERRED_LANGUAGES = config.PREFERRED_LANGUAGES;
+        PREFERRED_VIDEO_QUALITIES_CONFIG = config.PREFERRED_VIDEO_QUALITIES_CONFIG;
+        PREFERRED_AUDIO_QUALITIES_CONFIG = config.PREFERRED_AUDIO_QUALITIES_CONFIG;
 
-    const processedStreams = [];
-    const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
+        const processedStreams = [];
+        const processedInfoHashes = new Set(); // Use a Set to efficiently track and prevent duplicate infoHashes
 
-    for (const result of jackettResults) {
-        if (!result.InfoHash && !result.MagnetUri) continue;
+        for (const result of jackettResults) {
+            // Use simpleGet instead of lodash.get
+            if (!result.InfoHash && !simpleGet(result, 'MagnetUri')) continue;
 
-        let infoHash = result.InfoHash || get(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1];
-        if (!infoHash) continue;
-        infoHash = infoHash.toLowerCase();
+            let infoHash = result.InfoHash || simpleGet(result, 'MagnetUri', '').match(/btih:([^&/]+)/)?.[1];
+            if (!infoHash) continue;
+            infoHash = infoHash.toLowerCase();
 
-        if (processedInfoHashes.has(infoHash)) continue;
+            if (processedInfoHashes.has(infoHash)) continue;
 
-        if (!validateTorrentTitle(metadata, season, episode, result.Title)) continue;
+            // --- New: Pre-filtering low-quality results ---
+            const lowerTitle = result.Title.toLowerCase();
 
-        if (result.Seeders < MINIMUM_SEEDERS) {
-            continue; // Filtered by min seeders
-        }
-
-        const torrentSizeMB = result.Size / (1024 * 1024);
-        if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
-            continue; // Filtered by size
-        }
-
-        const detectedLanguage = getTorrentLanguage(result.Title);
-        if (PREFERRED_LANGUAGES.length > 0) {
-            if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
-                continue; // Filtered by language preference
+            // Filter out TS/Telecine
+            if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
+                // console.log(`[WORKER][FILTERED] Low quality (TS/Telecine): ${result.Title}`); // Too verbose for worker
+                continue;
             }
+
+            // Parse details early for resolution filtering
+            const parsedDetails = parseTorrentDetails(result.Title);
+
+            // Filter out resolutions less than 720p
+            if (getResolutionRank(parsedDetails.resolution) < getResolutionRank('720p')) {
+                // console.log(`[WORKER][FILTERED] Low resolution (<720p): ${result.Title} (${parsedDetails.resolution || 'N/A'})`); // Too verbose
+                continue;
+            }
+
+            // Existing validations and filters
+            if (!validateTorrentTitle(metadata, season, episode, result.Title)) continue;
+
+            if (result.Seeders < MINIMUM_SEEDERS) {
+                continue;
+            }
+
+            const torrentSizeMB = result.Size / (1024 * 1024);
+            if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
+                continue;
+            }
+
+            const detectedLanguage = getTorrentLanguage(result.Title);
+            if (PREFERRED_LANGUAGES.length > 0) {
+                if (!detectedLanguage || !PREFERRED_LANGUAGES.includes(detectedLanguage)) {
+                    continue;
+                }
+            }
+
+            const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
+
+            processedInfoHashes.add(infoHash); // Add to processed list after all filters pass
+
+            processedStreams.push({
+                originalResult: result,
+                magnetLink: magnetLink,
+                infoHash: infoHash,
+                parsedDetails: parsedDetails, // Already parsed, reuse
+                resolutionRank: getResolutionRank(parsedDetails.resolution),
+                videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
+                audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
+                hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && parsedDetails.language && PREFERRED_LANGUAGES.includes(parsedDetails.language),
+            });
         }
 
-        // Parse detailed quality information
-        const parsedDetails = parseTorrentDetails(result.Title);
-        const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
-
-        processedInfoHashes.add(infoHash); // Add to processed list after all filters pass
-
-        processedStreams.push({
-            originalResult: result,
-            magnetLink: magnetLink,
-            infoHash: infoHash,
-            parsedDetails: parsedDetails,
-            resolutionRank: getResolutionRank(parsedDetails.resolution),
-            videoQualityRank: getVideoQualityRank(parsedDetails.videoQuality),
-            audioQualityRank: getAudioQualityRank(parsedDetails.audioQuality),
-            hasPreferredLanguage: PREFERRED_LANGUAGES.length > 0 && parsedDetails.language && PREFERRED_LANGUAGES.includes(parsedDetails.language),
-        });
+        const workerEndTime = performance.now();
+        // Log to console from worker thread (visible in Docker logs)
+        console.log(`[INFO][WORKER] Processing ${jackettResults.length} raw results to ${processedStreams.length} filtered results in: ${((workerEndTime - workerStartTime) / 1000).toFixed(2)} seconds.`);
+        parentPort.postMessage(processedStreams);
+    } catch (err) {
+        console.error(`[ERROR][WORKER] Unhandled error during torrent processing: ${err.message}`);
+        console.error(err.stack); // Log the full stack trace for debugging
+        // Send an error message back to the main thread
+        parentPort.postMessage({ error: err.message, stack: err.stack });
     }
-
-    // Initial sort by PublishedDate (most recent first) before sending back
-    processedStreams.sort((a, b) => {
-        const dateA = new Date(a.originalResult.PublishDate).getTime();
-        const dateB = new Date(b.originalResult.PublishDate).getTime();
-        return dateB - dateA; // Descending order
-    });
-
-    parentPort.postMessage(processedStreams);
 });
