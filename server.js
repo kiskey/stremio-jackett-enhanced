@@ -309,6 +309,7 @@ builder.defineStreamHandler(async (args) => {
             const result = stream.originalResult;
             const torrentSizeMB = (result.Size / (1024 * 1024)).toFixed(2);
 
+            // Construct title for Stremio, including parsed details
             let titleParts = [result.Title];
             if (stream.parsedDetails.resolution) titleParts.push(stream.parsedDetails.resolution.toUpperCase());
             if (stream.parsedDetails.videoQuality) titleParts.push(stream.parsedDetails.videoQuality.toUpperCase());
@@ -316,11 +317,16 @@ builder.defineStreamHandler(async (args) => {
             if (stream.parsedDetails.language) titleParts.push(stream.parsedDetails.language.charAt(0).toUpperCase() + stream.parsedDetails.language.slice(1));
             titleParts.push(`S:${result.Seeders}`, `L:${result.Peers}`, `Size:${torrentSizeMB}MB`);
 
+            // Construct sources array with individual trackers and DHT node
+            const streamSources = publicTrackers.map(trackerUrl => `tracker:${trackerUrl}`);
+            streamSources.push(`dht:${stream.infoHash}`);
+
             stremioStreams.push({
                 name: `Jackett | ${result.Tracker}`,
                 title: titleParts.join(' | '),
                 infoHash: stream.infoHash,
-                sources: [`${stream.magnetLink}`],
+                // Pass the original magnet link as the primary source
+                sources: [`${stream.magnetLink}`].concat(streamSources), // Concatenate magnet link with explicit trackers/dht
             });
         }
 
