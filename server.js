@@ -298,7 +298,7 @@ function getTorrentLanguage(torrentTitle) {
 // Corrected instantiation: use 'addonBuilder' (lowercase)
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.1.1', // Updated version for bug fix
+    version: '1.1.2', // Updated version for bug fix
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering and validation.',
     resources: ['stream'],
@@ -310,14 +310,8 @@ const builder = new addonBuilder({
 });
 
 // Define the stream handler
-builder.defineStream({
-    id: 'stream-provider', // This ID is internal to the addon's manifest
-    type: 'movie',         // This defines the types it supports. Actual type comes from args.type.
-    name: 'Jackett Streams',
-    description: 'Finds torrent streams from Jackett',
-    icon: 'https://cdn.iconscout.com/icon/free/png-256/jackett-3027871-2522777.png',
-    version: '1.1.1'
-}, async (args) => {
+// Corrected method name: defineStreamHandler
+builder.defineStreamHandler(async (args) => {
     const startTime = performance.now(); // Mark the start of processing
 
     // Extract IMDb ID and item type from the Stremio request arguments
