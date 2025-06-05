@@ -22,7 +22,6 @@ let MAX_TORRENT_SIZE_MB;
 let PREFERRED_LANGUAGES;
 let PREFERRED_VIDEO_QUALITIES_CONFIG;
 let PREFERRED_AUDIO_QUALITIES_CONFIG;
-// INITIAL_DATE_FILTER_LIMIT is no longer needed in worker as sorting/limiting is done in main thread query
 
 // --- Utility Functions for Validation, Parsing, and Filtering ---
 
@@ -247,7 +246,8 @@ parentPort.on('message', (message) => {
 
         for (const result of resultsToProcess) {
             try { // Individual try-catch for each result to prevent worker crash
-                const lowerTitle = result.Title ? result.Title.toLowerCase() : '';
+                const title = simpleGet(result, 'Title', ''); // Use simpleGet for Title
+                const lowerTitle = title.toLowerCase();
 
                 // --- Early Filtering of low-quality types (TS/Telecine) ---
                 if (lowerTitle.includes('ts') || lowerTitle.includes('telecine')) {
@@ -255,16 +255,16 @@ parentPort.on('message', (message) => {
                 }
 
                 // --- Basic InfoHash/MagnetUri Validation ---
-                if (!result.InfoHash && (!result.MagnetUri || typeof result.MagnetUri !== 'string')) continue;
+                if (!simpleGet(result, 'InfoHash', null) && (!simpleGet(result, 'MagnetUri', null) || typeof simpleGet(result, 'MagnetUri', null) !== 'string')) continue;
 
-                let infoHash = result.InfoHash || (typeof result.MagnetUri === 'string' ? result.MagnetUri.match(/btih:([^&/]+)/)?.[1] : null);
+                let infoHash = simpleGet(result, 'InfoHash', null) || (typeof simpleGet(result, 'MagnetUri', null) === 'string' ? simpleGet(result, 'MagnetUri', null).match(/btih:([^&/]+)/)?.[1] : null);
                 if (!infoHash) continue;
                 infoHash = infoHash.toLowerCase();
 
                 if (processedInfoHashes.has(infoHash)) continue;
 
                 // --- Validate Torrent Title vs. Expected Metadata ---
-                if (!validateTorrentTitle(metadata, season, episode, result.Title || '')) continue;
+                if (!validateTorrentTitle(metadata, season, episode, title)) continue;
 
                 // --- Prioritize Torznab API fields, fallback to title parsing ONLY IF NOT AVAILABLE ---
                 let torrentResolution = simpleGet(result, 'Resolution', null);
@@ -273,23 +273,19 @@ parentPort.on('message', (message) => {
                 let torrentLanguage = simpleGet(result, 'Language', null); // Jackett's 'Language' field
 
                 // Fallback to title parsing only if Torznab API fields are explicitly null/undefined/empty
-                const parsedDetailsFromTitle = parseTorrentDetails(result.Title || '');
+                const parsedDetailsFromTitle = parseTorrentDetails(title);
 
                 if (!torrentResolution) {
                      torrentResolution = parsedDetailsFromTitle.resolution;
-                     if(torrentResolution) console.log(`[WORKER] Fallback: Found resolution from title for "${result.Title}": ${torrentResolution}`);
                 }
                 if (!torrentVideoQuality) {
                      torrentVideoQuality = parsedDetailsFromTitle.videoQuality;
-                     if(torrentVideoQuality) console.log(`[WORKER] Fallback: Found video quality from title for "${result.Title}": ${torrentVideoQuality}`);
                 }
                 if (!torrentAudioQuality) {
                      torrentAudioQuality = parsedDetailsFromTitle.audioQuality;
-                     if(torrentAudioQuality) console.log(`[WORKER] Fallback: Found audio quality from title for "${result.Title}": ${torrentAudioQuality}`);
                 }
                 if (!torrentLanguage) {
                      torrentLanguage = parsedDetailsFromTitle.language;
-                     if(torrentLanguage) console.log(`[WORKER] Fallback: Found language from title for "${result.Title}": ${torrentLanguage}`);
                 }
 
                 // Create a consolidated parsedDetails object
@@ -306,12 +302,12 @@ parentPort.on('message', (message) => {
                 }
 
                 // --- Existing Filters (Seeders, Size, Language Preference) ---
-                const currentSeeders = typeof result.Seeders === 'number' ? result.Seeders : 0;
+                const currentSeeders = simpleGet(result, 'Seeders', 0); // Use simpleGet for Seeders
                 if (currentSeeders < MINIMUM_SEEDERS) {
                     continue;
                 }
 
-                const currentSize = typeof result.Size === 'number' ? result.Size : 0;
+                const currentSize = simpleGet(result, 'Size', 0); // Use simpleGet for Size
                 const torrentSizeMB = currentSize / (1024 * 1024);
                 if (torrentSizeMB < MIN_TORRENT_SIZE_MB || torrentSizeMB > MAX_TORRENT_SIZE_MB) {
                     continue;
@@ -325,12 +321,11 @@ parentPort.on('message', (message) => {
                 }
 
                 // --- Published Date Handling ---
-                // Strictly use result.PublishedDate from API. If invalid/missing, set to null.
-                let torrentPublishedDate = null;
-                if (result.PublishedDate && !isNaN(new Date(result.PublishedDate).getTime())) {
-                    torrentPublishedDate = result.PublishedDate;
-                } else {
-                    console.warn(`[WORKER] Invalid or missing PublishedDate from API for "${result.Title}". Setting to null for sorting.`);
+                // Strictly use result.PublishedDate from API. If invalid/missing, set to null. No title parsing for date.
+                let torrentPublishedDate = simpleGet(result, 'PublishedDate', null);
+                if (torrentPublishedDate && isNaN(new Date(torrentPublishedDate).getTime())) {
+                    console.warn(`[WORKER] Invalid PublishedDate from API for "${title}". Setting to null for sorting.`);
+                    torrentPublishedDate = null;
                 }
 
                 const magnetLink = `magnet:?xt=urn:btih:${infoHash}&${publicTrackers.map(t => `tr=${encodeURIComponent(t)}`).join('&')}`;
@@ -350,7 +345,7 @@ parentPort.on('message', (message) => {
                 });
             } catch (innerErr) {
                 // Catch errors for an individual torrent result to prevent the entire worker from crashing
-                console.error(`[ERROR][WORKER] Error processing individual torrent "${result.Title || 'Unknown Title'}": ${innerErr.message}`);
+                console.error(`[ERROR][WORKER] Error processing individual torrent "${simpleGet(result, 'Title', 'Unknown Title')}": ${innerErr.message}`);
                 console.error(innerErr.stack);
             }
         }
