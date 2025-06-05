@@ -1,13 +1,15 @@
 // server.js - Stremio Addon for Jackett Integration with advanced features
 
-const { AddonBuilder, get } = require('stremio-addon-sdk');
+// Corrected import: 'addonBuilder' should be lowercase 'a'
+const { addonBuilder, get } = require('stremio-addon-sdk');
 const { performance } = require('perf_hooks'); // For measuring execution time
+require('dotenv').config(); // Load environment variables from .env file
 
 // --- Configuration (Set these as environment variables or update directly) ---
 const JACKETT_HOST = process.env.JACKETT_HOST || 'http://localhost:9117';
-const JACKETT_API_KEY = process.env.JACKETT_API_KEY || 'your_jackett_api_key'; // !!! IMPORTANT: Replace with your actual Jackett API Key !!!
-const OMDb_API_KEY = process.env.OMDB_API_KEY || 'your_omdb_api_key';     // !!! IMPORTANT: Replace with your actual OMDb API Key !!!
-const TMDB_API_KEY = process.env.TMDB_API_KEY || 'your_tmdb_api_key';     // !!! IMPORTANT: Replace with your actual TMDB API Key !!!
+const JACKETT_API_KEY = process.env.JACKETT_API_KEY || 'YOUR_JACKETT_API_KEY_HERE'; // !!! IMPORTANT: Replace with your actual Jackett API Key !!!
+const OMDb_API_KEY = process.env.OMDB_API_KEY || 'YOUR_OMDB_API_KEY_HERE';     // !!! IMPORTANT: Replace with your actual OMDb API Key !!!
+const TMDB_API_KEY = process.env.TMDB_API_KEY || 'YOUR_TMDB_API_KEY_HERE';     // !!! IMPORTANT: Replace with your actual TMDB API Key !!!
 
 const TRACKERS_URL = process.env.TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/refs/heads/master/trackers_best.txt';
 const RESPONSE_TIMEOUT_MS = parseInt(process.env.RESPONSE_TIMEOUT_MS || '20000', 10); // Max time to respond to Stremio
@@ -293,9 +295,10 @@ function getTorrentLanguage(torrentTitle) {
 }
 
 // --- Stremio Addon Setup ---
-const builder = new AddonBuilder({
+// Corrected instantiation: use 'addonBuilder' (lowercase)
+const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.1.0', // Updated version for new features
+    version: '1.1.1', // Updated version for bug fix
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering and validation.',
     resources: ['stream'],
@@ -313,7 +316,7 @@ builder.defineStream({
     name: 'Jackett Streams',
     description: 'Finds torrent streams from Jackett',
     icon: 'https://cdn.iconscout.com/icon/free/png-256/jackett-3027871-2522777.png',
-    version: '1.1.0'
+    version: '1.1.1'
 }, async (args) => {
     const startTime = performance.now(); // Mark the start of processing
 
