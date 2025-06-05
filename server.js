@@ -1,7 +1,7 @@
 // server.js - Stremio Addon for Jackett Integration with advanced features
 
-// Corrected import: 'addonBuilder' should be lowercase 'a'
-const { addonBuilder, get } = require('stremio-addon-sdk');
+// Corrected import: 'addonBuilder' and 'serveHTTP' are exported directly
+const { addonBuilder, get, serveHTTP } = require('stremio-addon-sdk');
 const { performance } = require('perf_hooks'); // For measuring execution time
 require('dotenv').config(); // Load environment variables from .env file
 
@@ -175,7 +175,7 @@ function buildMagnetLink(infoHash, trackers) {
     return `magnet:?xt=urn:btih:${infoHash}&${trackerParams}`;
 }
 
-// --- New Utility Functions for Validation and Filtering ---
+// --- Utility Functions for Validation and Filtering ---
 
 /**
  * Sanitizes and standardizes a title for robust comparison.
@@ -295,10 +295,9 @@ function getTorrentLanguage(torrentTitle) {
 }
 
 // --- Stremio Addon Setup ---
-// Corrected instantiation: use 'addonBuilder' (lowercase)
 const builder = new addonBuilder({
     id: 'org.jackett.stremio.addon',
-    version: '1.1.2', // Updated version for bug fix
+    version: '1.1.3', // Updated version for bug fix
     name: 'Jackett Stream Provider',
     description: 'Provides P2P streams sourced from Jackett with advanced filtering and validation.',
     resources: ['stream'],
@@ -310,7 +309,6 @@ const builder = new addonBuilder({
 });
 
 // Define the stream handler
-// Corrected method name: defineStreamHandler
 builder.defineStreamHandler(async (args) => {
     const startTime = performance.now(); // Mark the start of processing
 
@@ -506,8 +504,8 @@ fetchAndCacheTrackers().then(() => {
     console.log('[INFO] [SERVER STARTUP] Public tracker pre-fetch complete.');
 });
 
-// Set up the HTTP server for the addon
-builder.serveHTTP();
+// Set up the HTTP server for the addon using the correct function call
+serveHTTP(builder.getInterface()); // Corrected: serveHTTP is a function, not a builder method
 
 console.log('[INFO] Logging Level: info');
 console.log(`[INFO] Response Timeout: ${RESPONSE_TIMEOUT_MS}ms`);
