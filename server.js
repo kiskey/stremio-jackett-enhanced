@@ -526,9 +526,9 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
   // Check if primary title or any aka title exists in the normalized item title
   const hasStrongTitleOverlap = [normalizedPrimaryTitle, ...normalizedAkaTitles].some(t => {
     // Require at least 50% match for shorter titles, or presence of full title for longer ones
-    if (!t) return false;
-    if (t.length > 5 && normalizedItemTitle.includes(t)) return true; // Full title match
-    if (t.length <= 5 && normalizedItemTitle.includes(t)) return true; // Short exact match
+    if (!t) return false; // Ensure 't' is not null or empty
+    if (t.length > 5 && normalizedItemTitle.includes(t)) return true; // Full title match for longer titles
+    if (t.length <= 5 && t.length > 0 && normalizedItemTitle.includes(t)) return true; // Exact match for short titles (e.g. "KO" for Korean)
     return false;
   });
 
@@ -541,26 +541,18 @@ const validateJackettResult = (item, metadata, wasIdQuery, config) => {
   // The querying strategy (which queries are sent to Jackett) is now what determines initial relevance.
   // This validation acts as a final filter.
   if (wasIdQuery) {
-    // For content requested via IMDb/TMDB ID, we expect a strong match.
-    // It must either contain the ID or have a very strong title/year overlap.
-    if (containsImdbId || containsTmdbId) {
-        // If an ID is present in the torrent title, we'll generally consider it a good sign.
-        // We add `hasStrongTitleOverlap` as a secondary check to avoid cases like "tt1234567" appearing
-        // in a torrent for a completely different movie.
-        if (hasStrongTitleOverlap || (!metadata.title && !metadata.akaTitles.length)) { 
-            passesTitleMatch = true;
-            debugReason = `ID Query: Matched ID (${metadata.imdbId || metadata.tmdbId}) in torrent title.`;
-        } else {
-            // If ID is present but title is completely unrelated, it's probably junk
-            debugReason = `ID Query: ID present but insufficient title match for "${item.Title}".`;
-        }
-    } else if (hasStrongTitleOverlap && yearMatches) {
-        // If no ID is found in the title, but there's a strong title+year match, still accept.
+    // For content requested via IMDb/TMDB ID, we expect a strong match from the torrent title.
+    // It must either contain the explicit ID (though rare) OR have a very strong title/year overlap.
+    if (hasStrongTitleOverlap && yearMatches) {
         passesTitleMatch = true;
-        debugReason = `ID Query: Strong Title/AKA/Year Match (without explicit ID in torrent title) for "${metadata.title}" (${metadata.year}).`;
+        debugReason = `ID Query: Strong Title/AKA/Year Match for "${metadata.title}" (${metadata.year}).`;
+    } else if (containsImdbId || containsTmdbId) {
+        // If explicit ID is present, we still prefer title match, but will accept if title info was weak.
+        // This handles cases where metadata.title might be null/generic but ID is accurate.
+        passesTitleMatch = true;
+        debugReason = `ID Query: Explicit ID (${metadata.imdbId || metadata.tmdbId}) found in torrent title.`;
     } else {
-        // If neither ID nor strong title/year match, it's irrelevant for an ID query.
-        debugReason = `ID Query: No ID match and insufficient title/year match for "${item.Title}".`;
+        debugReason = `ID Query: No sufficient title/AKA/year match and no explicit ID found in torrent title for "${metadata.title}" (${metadata.year || metadata.imdbId}). Torrent: "${item.Title}"`;
     }
 
     if (!passesTitleMatch) {
@@ -671,7 +663,7 @@ app.get('/manifest.json', (req, res) => {
 
   res.json({
     id: 'community.stremio.jackettaddon.enhanced', 
-    version: '1.0.3', // Incremented version after query strategy fix
+    version: '1.0.4', // Incremented version after validation logic fix
     name: 'Jackett Enhanced Streams',
     description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options. Prioritizes title-based searches for better relevance.',
     resources: ['catalog', 'stream'],
