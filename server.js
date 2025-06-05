@@ -19,11 +19,9 @@ app.use(express.json()); // For parsing application/json
 // Serve static files from the 'public' directory for the configuration UI
 app.use(express.static('public'));
 
-// --- Constants and Utility Functions ---
-
 // Default configuration for the addon
-// These can be overridden by environment variables in production
-const DEFAULT_CONFIG = {
+// These will be overridden by query parameters from Stremio's manifest config
+let CURRENT_CONFIG = {
   jackettUrl: process.env.JACKETT_URL || 'http://localhost:9117',
   jackettApiKey: process.env.JACKETT_API_KEY || 'YOUR_JACKETT_API_KEY',
   omdbApiKey: process.env.OMDB_API_KEY || 'YOUR_OMDB_API_KEY',
@@ -32,17 +30,11 @@ const DEFAULT_CONFIG = {
   preferredLanguages: (process.env.PREFERRED_LANGUAGES || 'Tamil,Hindi,Malayalam,Telugu,English,Japanese,Korean,Chinese').split(',').map(item => item.trim()).filter(Boolean),
   maxResults: parseInt(process.env.MAX_RESULTS || '50', 10),
   maxSize: parseInt(process.env.MAX_SIZE || '0', 10), // Max size in bytes (0 means no restriction)
-  // Logging level: 'debug', 'info', 'warn', 'error', 'silent'
+  publicTrackersUrl: process.env.PUBLIC_TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
   logLevel: process.env.LOG_LEVEL || 'info', 
-  publicTrackersUrl: process.env.PUBLIC_TRACKERS_URL || 'https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt', // Default public trackers URL
+  filterBySeeders: parseInt(process.env.FILTER_BY_SEEDERS || '0', 10), // New: Configurable minimum seeders
+  sortBy: process.env.SORT_BY || 'seeders', // New: Configurable sort order
 };
-
-// Jackett Category mappings based on user's input
-const JACKETT_CATEGORIES = {
-    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
-    series: '5000,5030,5040,5045,105000,105040,105030,105045'
-};
-
 
 // --- Simple Logging Utility ---
 const LOG_LEVELS = {
@@ -55,16 +47,16 @@ const LOG_LEVELS = {
 
 const log = {
   debug: (...args) => {
-    if (LOG_LEVELS[DEFAULT_CONFIG.logLevel] <= LOG_LEVELS.debug) console.log('[DEBUG]', ...args);
+    if (LOG_LEVELS[CURRENT_CONFIG.logLevel] <= LOG_LEVELS.debug) console.log('[DEBUG]', ...args);
   },
   info: (...args) => {
-    if (LOG_LEVELS[DEFAULT_CONFIG.logLevel] <= LOG_LEVELS.info) console.log('[INFO]', ...args);
+    if (LOG_LEVELS[CURRENT_CONFIG.logLevel] <= LOG_LEVELS.info) console.log('[INFO]', ...args);
   },
   warn: (...args) => {
-    if (LOG_LEVELS[DEFAULT_CONFIG.logLevel] <= LOG_LEVELS.warn) console.warn('[WARN]', ...args);
+    if (LOG_LEVELS[CURRENT_CONFIG.logLevel] <= LOG_LEVELS.warn) console.warn('[WARN]', ...args);
   },
   error: (...args) => {
-    if (LOG_LEVELS[DEFAULT_CONFIG.logLevel] <= LOG_LEVELS.error) console.error('[ERROR]', ...args);
+    if (LOG_LEVELS[CURRENT_CONFIG.logLevel] <= LOG_LEVELS.error) console.error('[ERROR]', ...args);
   },
 };
 
@@ -78,7 +70,7 @@ const TRACKER_CACHE_TTL = 12 * 60 * 60 * 1000; // 12 hours in milliseconds
  * This function is called on startup and periodically.
  * @returns {Promise<Array<string>>} A promise that resolves to an array of tracker URLs.
  */
-const fetchAndCachePublicTrackers = async () => {
+const fetchAndCachePublicTrackers = async (publicTrackersUrl) => {
   const currentTime = Date.now();
   // If cache is not empty and still fresh, return cached trackers
   if (cachedPublicTrackers.length > 0 && (currentTime - lastTrackersFetchTime < TRACKER_CACHE_TTL)) {
@@ -86,10 +78,10 @@ const fetchAndCachePublicTrackers = async () => {
     return cachedPublicTrackers;
   }
 
-  log.info('Fetching public trackers from URL:', DEFAULT_CONFIG.publicTrackersUrl);
+  log.info('Fetching public trackers from URL:', publicTrackersUrl);
 
   try {
-    const response = await fetch(DEFAULT_CONFIG.publicTrackersUrl);
+    const response = await fetch(publicTrackersUrl);
     if (!response.ok) {
       throw new Error(`Failed to fetch trackers: ${response.statusText} (Status: ${response.status})`);
     }
@@ -103,23 +95,17 @@ const fetchAndCachePublicTrackers = async () => {
       log.info(`Successfully fetched and cached ${trackers.length} public trackers.`);
     } else {
       log.warn('Fetched an empty list of trackers. Retaining old cache or falling back to empty list.');
-      // If fetched list is empty, don't update cache time, and potentially use old cache
     }
     return cachedPublicTrackers; // Return the newly fetched or existing cached trackers
   } catch (error) {
     log.error('Error fetching public trackers:', error.message);
-    // If fetch fails, use the existing cached list if available.
-    // If cache is also empty (e.g., first run and fetch failed), it will be an empty array.
     log.warn('Using existing cached public trackers or empty list due to fetch error.');
     return cachedPublicTrackers; 
   }
 };
 
-// Initial fetch on startup
-fetchAndCachePublicTrackers();
-
-// Schedule periodic refresh of public trackers
-setInterval(fetchAndCachePublicTrackers, TRACKER_CACHE_TTL);
+// Schedule periodic refresh of public trackers (initial call will happen with the first request)
+// setInterval(fetchAndCachePublicTrackers, TRACKER_CACHE_TTL); // This will be called on demand via config update
 
 /**
  * Normalizes a string for comparison by converting to lowercase,
@@ -149,16 +135,18 @@ const RESOLUTION_PATTERNS = {
   '480p': /(480p|SD)/i,
 };
 
+// Comprehensive language patterns including abbreviations and Unicode ranges for specific languages
 const LANGUAGE_PATTERNS = {
-  'English': /(eng|english)/i,
-  'Hindi': /(hin|hindi|हिंदी)/i,
-  'Tamil': /(tam|tamil|தமிழ்)/i,
-  'Malayalam': /(mal|malayalam|മലയാളം)/i,
-  'Telugu': /(tel|telugu|తెలుగు)/i,
-  'Japanese': /(jpn|japanese|日本語)/i,
-  'Korean': /(kor|korean|한국어)/i,
-  'Chinese': /(chi|chinese|中文|普通话)/i,
+  'English': /(eng|english|en)\b/i,
+  'Hindi': /(hin|hindi|हिंदी|h.indi)\b/i, // Added common Hindi abbreviations
+  'Tamil': /(tam|tamil|தமிழ்)\b/i, // Added Tamil script Unicode check
+  'Malayalam': /(mal|malayalam|മലയാളം)\b/i, // Added Malayalam script Unicode check
+  'Telugu': /(tel|telugu|తెలుగు)\b/i, // Added Telugu script Unicode check
+  'Japanese': /(jpn|japanese|日本語|ja)\b/i, // Added common Japanese abbreviations and Kanji
+  'Korean': /(kor|korean|한국어|ko)\b/i, // Added common Korean abbreviations and Hangul
+  'Chinese': /(chi|chinese|中文|zh)\b/i, // Added common Chinese abbreviations and Han characters
 };
+
 
 /**
  * Extracts resolution from a torrent title.
@@ -178,7 +166,7 @@ const extractResolution = (title) => {
  * Extracts language from a torrent title.
  * @param {string} title - The torrent title.
  * @returns {string|null} The detected language (e.g., 'English') or null if not found.
- */
+*/
 const extractLanguage = (title) => {
   for (const lang in LANGUAGE_PATTERNS) {
     if (LANGUAGE_PATTERNS[lang].test(title)) {
@@ -224,24 +212,26 @@ const formatBytes = (bytes) => {
 /**
  * Fetches metadata (title, year, aka titles) for an IMDB ID from OMDB and/or TMDB.
  * @param {string} imdbId - The IMDB ID (e.g., 'tt1234567').
+ * @param {string} omdbApiKey - OMDB API Key.
+ * @param {string} tmdbApiKey - TMDB API Key.
  * @returns {Promise<object>} An object containing metadata like title, year, akaTitles, tmdbId.
  */
-const fetchMetadataFromOmdbTmdb = async (imdbId) => {
-  let metadata = { title: null, year: null, akaTitles: [], tmdbId: null };
+const fetchMetadataFromOmdbTmdb = async (imdbId, omdbApiKey, tmdbApiKey) => {
+  let metadata = { title: null, year: null, akaTitles: [], tmdbId: null, imdbId: imdbId }; // Add imdbId to metadata
   
   // 1. Try OMDB first
-  if (DEFAULT_CONFIG.omdbApiKey && DEFAULT_CONFIG.omdbApiKey !== 'YOUR_OMDB_API_KEY') {
+  if (omdbApiKey && omdbApiKey !== 'YOUR_OMDB_API_KEY') {
     log.debug(`Fetching OMDB metadata for IMDB ID: ${imdbId}`);
     try {
-      const omdbUrl = `https://www.omdbapi.com/?i=${imdbId}&apikey=${DEFAULT_CONFIG.omdbApiKey}`;
+      const omdbUrl = `https://www.omdbapi.com/?i=${imdbId}&apikey=${omdbApiKey}`;
       const omdbResponse = await fetch(omdbUrl);
       const omdbData = await omdbResponse.json();
       if (omdbData && omdbData.Response === 'True') {
         metadata.title = omdbData.Title;
         metadata.year = omdbData.Year;
-        // OMDB doesn't typically provide 'aka titles' directly in a structured way for search
         log.debug(`OMDB metadata found: ${JSON.stringify(metadata)}`);
-        return metadata; // Return immediately if OMDB provides enough info
+        // OMDB doesn't typically provide 'aka titles' directly in a structured way for search,
+        // so we'll still attempt TMDB for alternative titles if needed or if OMDB is not enough.
       } else {
         log.warn(`OMDB did not return valid data for ${imdbId}: ${omdbData.Error || 'Unknown error'}`);
       }
@@ -252,12 +242,11 @@ const fetchMetadataFromOmdbTmdb = async (imdbId) => {
     log.warn('OMDB API Key not configured or is default. Skipping OMDB lookup.');
   }
 
-  // 2. Fallback to TMDB if OMDB fails or not configured
-  if (DEFAULT_CONFIG.tmdbApiKey && DEFAULT_CONFIG.tmdbApiKey !== 'YOUR_TMDB_API_KEY') {
+  // 2. Fallback to TMDB if OMDB failed to provide title or not configured
+  if (tmdbApiKey && tmdbApiKey !== 'YOUR_TMDB_API_KEY') {
     log.debug(`Fetching TMDB metadata for IMDB ID: ${imdbId}`);
     try {
-      // TMDB requires a find endpoint to convert IMDB ID to TMDB ID
-      const tmdbFindUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${DEFAULT_CONFIG.tmdbApiKey}&external_source=imdb_id`;
+      const tmdbFindUrl = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${tmdbApiKey}&external_source=imdb_id`;
       const tmdbFindResponse = await fetch(tmdbFindUrl);
       const tmdbFindData = await tmdbFindResponse.json();
 
@@ -267,25 +256,38 @@ const fetchMetadataFromOmdbTmdb = async (imdbId) => {
       if (tmdbFindData.movie_results && tmdbFindData.movie_results.length > 0) {
         tmdbId = tmdbFindData.movie_results[0].id;
         mediaType = 'movie';
-        metadata.title = tmdbFindData.movie_results[0].title;
-        metadata.year = tmdbFindData.movie_results[0].release_date ? tmdbFindData.movie_results[0].release_date.substring(0, 4) : null;
+        // Only update title/year if OMDB didn't provide it, or if TMDB's is potentially better
+        if (!metadata.title) {
+            metadata.title = tmdbFindData.movie_results[0].title;
+            metadata.year = tmdbFindData.movie_results[0].release_date ? tmdbFindData.movie_results[0].release_date.substring(0, 4) : null;
+        }
       } else if (tmdbFindData.tv_results && tmdbFindData.tv_results.length > 0) {
         tmdbId = tmdbFindData.tv_results[0].id;
         mediaType = 'tv';
-        metadata.title = tmdbFindData.tv_results[0].name;
-        metadata.year = tmdbFindData.tv_results[0].first_air_date ? tmdbFindData.tv_results[0].first_air_date.substring(0, 4) : null;
+        if (!metadata.title) {
+            metadata.title = tmdbFindData.tv_results[0].name;
+            metadata.year = tmdbFindData.tv_results[0].first_air_date ? tmdbFindData.tv_results[0].first_air_date.substring(0, 4) : null;
+        }
       }
 
       if (tmdbId && mediaType) {
         // Fetch alternative titles
-        const tmdbAltTitlesUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/alternative_titles?api_key=${DEFAULT_CONFIG.tmdbApiKey}`;
+        const tmdbAltTitlesUrl = `https://api.themoviedb.org/3/${mediaType}/${tmdbId}/alternative_titles?api_key=${tmdbApiKey}`;
         const tmdbAltTitlesResponse = await fetch(tmdbAltTitlesUrl);
         const tmdbAltTitlesData = await tmdbAltTitlesResponse.json();
         if (tmdbAltTitlesData.results) {
-          metadata.akaTitles = tmdbAltTitlesData.results.map(t => t.title).filter(Boolean);
+          // Filter to only include titles in English or the original language, and avoid duplicates
+          const uniqueAltTitles = new Set(metadata.akaTitles); // Add existing ones
+          tmdbAltTitlesData.results.forEach(t => {
+            // Include titles that are 'default' or in 'en' language, or are different from the primary title
+            if (t.title && t.title !== metadata.title && (t.iso_3166_1 === 'US' || t.iso_3166_1 === 'GB' || t.iso_3166_1 === 'null')) {
+              uniqueAltTitles.add(t.title);
+            }
+          });
+          metadata.akaTitles = Array.from(uniqueAltTitles);
         }
         metadata.tmdbId = tmdbId; // Store TMDB ID for potential Jackett query
-        log.debug(`TMDB metadata found: ${JSON.stringify(metadata)}`);
+        log.debug(`TMDB metadata found (and possibly updated title/year/akaTitles): ${JSON.stringify(metadata)}`);
       } else {
         log.warn(`TMDB did not find results for IMDB ID: ${imdbId}`);
       }
@@ -297,32 +299,35 @@ const fetchMetadataFromOmdbTmdb = async (imdbId) => {
     log.warn('TMDB API Key not configured or is default. Skipping TMDB lookup.');
   }
 
-  return metadata; // Return whatever was found, or empty object
+  return metadata;
 };
 
 
 /**
  * Fetches results from the actual Jackett API.
  * @param {object} searchParams - An object containing parameters for the Jackett query (e.g., q, cat, imdbid, tmdbid).
- * @param {object} config - The addon configuration.
+ * @param {string} jackettUrl - The Jackett base URL.
+ * @param {string} jackettApiKey - The Jackett API Key.
+ * @param {number} limit - The maximum number of results to request from Jackett.
  * @returns {Promise<Array>} A promise that resolves to an array of Jackett torrent results.
  */
-const fetchJackettResults = async (searchParams, config) => {
-  if (!config.jackettUrl || config.jackettApiKey === 'YOUR_JACKETT_API_KEY') {
+const fetchJackettResults = async (searchParams, jackettUrl, jackettApiKey, limit) => {
+  if (!jackettUrl || jackettApiKey === 'YOUR_JACKETT_API_KEY') {
     log.error('Jackett URL or API Key not configured. Cannot fetch from Jackett.');
     throw new Error('Jackett URL or API Key is not configured.');
   }
 
-  const jackettApiUrl = new URL(`${config.jackettUrl}/api/v2.0/indexers/all/results/torznab/api`);
-  jackettApiUrl.searchParams.append('apikey', config.jackettApiKey);
-  // Set the limit to 100 to get enough raw results for post-filtering, or use maxResults if it's higher
-  jackettApiUrl.searchParams.append('limit', Math.max(config.maxResults, 100)); 
+  const jackettApiUrl = new URL(`${jackettUrl}/api/v2.0/indexers/all/results/torznab/api`);
+  jackettApiUrl.searchParams.append('apikey', jackettApiKey);
+  jackettApiUrl.searchParams.append('limit', limit); 
 
   // Add search parameters dynamically
   if (searchParams.q) jackettApiUrl.searchParams.append('q', searchParams.q);
-  if (searchParams.cat) jackettApiUrl.searchParams.append('cat', searchParams.cat); // Already comma-separated if multiple
+  if (searchParams.cat) jackettApiUrl.searchParams.append('cat', searchParams.cat);
   if (searchParams.imdbid) jackettApiUrl.searchParams.append('imdbid', searchParams.imdbid);
   if (searchParams.tmdbid) jackettApiUrl.searchParams.append('tmdbid', searchParams.tmdbid);
+  if (searchParams.season) jackettApiUrl.searchParams.append('season', searchParams.season); // For series
+  if (searchParams.ep) jackettApiUrl.searchParams.append('ep', searchParams.ep); // For series
 
   log.debug(`Fetching from Jackett: ${jackettApiUrl.toString()}`);
 
@@ -334,20 +339,15 @@ const fetchJackettResults = async (searchParams, config) => {
     }
     const xmlText = await response.text();
     
-    // Parse XML response
     const parser = new xml2js.Parser({
-      explicitArray: false, // Ensure single elements don't become arrays
-      mergeAttrs: true // Merge attributes into the element object
+      explicitArray: false, 
+      mergeAttrs: true 
     });
     const parsedXml = await parser.parseStringPromise(xmlText);
 
-    // Extract results from the parsed XML structure
-    // Jackett Torznab XML typically has items under rss.channel.item
     const rawResults = parsedXml?.rss?.channel?.item || [];
 
-    // Map XML results to a consistent object structure
     const mappedResults = rawResults.map(item => {
-        // Extract attributes from 'torznab:attr' array
         const attrs = item['torznab:attr'] || [];
         const findAttr = (name) => {
             const attr = attrs.find(a => a.name === name);
@@ -356,15 +356,14 @@ const fetchJackettResults = async (searchParams, config) => {
 
         return {
             Title: item.title,
-            MagnetUri: item.guid, // In Torznab XML, guid often contains the magnet link
+            MagnetUri: item.guid, 
             PublishDate: item.pubDate,
-            Size: parseInt(findAttr('size') || '0', 10), // Convert size to number
+            Size: parseInt(findAttr('size') || '0', 10), 
             Seeders: parseInt(findAttr('seeders') || '0', 10),
-            Leechers: parseInt(findAttr('leechers') || '0', 10), // Jackett might provide leechers directly or as peers-seeders
-            // Include other relevant attributes if present and needed
-            Tracker: item.tracker || item.jackettindexer || 'Unknown' // Get tracker name if available
+            Leechers: parseInt(findAttr('leechers') || '0', 10), 
+            Tracker: item.tracker || item.jackettindexer || 'Unknown' 
         };
-    }).filter(item => item.MagnetUri); // Filter out items without a magnet URI
+    }).filter(item => item.MagnetUri);
 
     return { Results: mappedResults };
 
@@ -377,36 +376,32 @@ const fetchJackettResults = async (searchParams, config) => {
 
 /**
  * Utility function to create a Stremio stream object from a Jackett torrent item and magnet URI.
- * This function adheres to the provided code snippet for formatting.
  * @param {object} tor - The Jackett torrent item object.
  * @param {string} type - The Stremio content type ('movie' or 'series').
  * @param {string} magnetUri - The magnet URI for the torrent.
+ * @param {string[]} currentTrackers - The list of public trackers to enrich the magnet URI.
  * @returns {object|null} The formatted Stremio stream object or null if parsing fails.
  */
-const createStremioStream = (tor, type, magnetUri) => {
+const createStremioStream = (tor, type, magnetUri, currentTrackers) => {
     let parsedTorrent;
     try {
         parsedTorrent = parseTorrent(magnetUri);
     } catch (e) {
         log.error(`Error parsing magnet URI for stream: ${e.message}. URI: ${magnetUri}`);
-        return null; // Return null if magnet URI is invalid
+        return null; 
     }
 
-    // IMPORTANT: Ensure infoHash is available and valid before proceeding
     const infoHash = parsedTorrent.infoHash ? parsedTorrent.infoHash.toLowerCase() : null;
     if (!infoHash) {
         log.warn(`Skipping stream for "${tor.Title}" due to missing/invalid infoHash after magnet URI parsing.`);
         return null;
     }
 
-    // Use Jackett's Title as the base for the stream's display title
     let title = tor.Title; 
 
-    // Extract resolution and language for the subtitle
     const resolution = extractResolution(tor.Title) || 'Unknown';
     const language = extractLanguage(tor.Title) || 'Unknown';
 
-    // Construct the subtitle string
     let subtitleParts = [];
     if (tor.Seeders !== undefined) subtitleParts.push(`S: ${tor.Seeders}`);
     if (tor.Leechers !== undefined) subtitleParts.push(`L: ${tor.Leechers}`);
@@ -414,23 +409,18 @@ const createStremioStream = (tor, type, magnetUri) => {
     if (language !== 'Unknown') subtitleParts.push(language);
     if (tor.Size) subtitleParts.push(formatBytes(tor.Size));
 
-    const subtitle = subtitleParts.join(' / '); // Use '/' as in the example snippet for subtitle
+    const subtitle = subtitleParts.join(' / '); 
 
-    // Combine title and subtitle
-    // The snippet uses '\r\n\r\n' for newlines, which is fine for display in Stremio
     title += (title.indexOf('\n') > -1 ? '\r\n' : '\r\n\r\n') + subtitle;
 
     // Prepare sources: existing announces from parsed torrent + enriched trackers
     const existingSources = (parsedTorrent.announce || []).map(x => `tracker:${x}`);
-    const enrichedTrackers = enrichMagnetUri(magnetUri).split('&tr=')
-                                .slice(1) // Remove the magnet:?xt=... part
-                                .map(t => `tracker:${decodeURIComponent(t)}`);
+    const newTrackers = currentTrackers.filter(tracker => !existingSources.includes(`tracker:${tracker}`)); // Avoid adding duplicates
     
-    // Combine all sources and ensure uniqueness
-    const allSources = [...new Set([...existingSources, ...enrichedTrackers, `dht:${infoHash}`])];
+    const allSources = [...new Set([...existingSources, ...newTrackers.map(t => `tracker:${t}`), `dht:${infoHash}`])];
 
     return {
-        name: tor.Tracker || 'Jackett', // Use the tracker name from Jackett result, or 'Jackett'
+        name: tor.Tracker || 'Jackett', 
         type: type,
         infoHash: infoHash,
         sources: allSources,
@@ -442,12 +432,12 @@ const createStremioStream = (tor, type, magnetUri) => {
  * Calculates a match score for a torrent item based on its title and metadata.
  * Higher score indicates a better match.
  * @param {object} item - The raw Jackett torrent item.
- * @param {object} metadata - The metadata object (title, year, akaTitles) obtained from OMDB/TMDB.
+ * @param {object} metadata - The metadata object (title, year, akaTitles, tmdbId, imdbId) obtained from OMDB/TMDB.
  * @returns {number} The match score.
  */
 const calculateMatchScore = (item, metadata) => {
     let score = 0;
-    const normalizedItemTitle = normalizeString(item.Title, true); // Use aggressive normalization for scoring
+    const normalizedItemTitle = normalizeString(item.Title, true); // Aggressive normalization for scoring
     const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
 
     const normalizedPrimaryTitle = normalizeString(metadata.title, true);
@@ -459,110 +449,129 @@ const calculateMatchScore = (item, metadata) => {
     } 
     // Next: Normalized Primary Title only (if year doesn't match or not available)
     else if (normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle)) {
-        score += 10;
+        score += 50; // Increased base for primary title
     }
 
     // Iterate through normalized aka titles for scoring
     for (const akaTitle of normalizedAkaTitles) {
         // Strongest aka match: Normalized AKA Title + Year
         if (akaTitle && normalizedItemTitle.includes(akaTitle) && metadata.year && itemYearMatch === metadata.year) {
-            score += 50; // Bonus for aka title + year match
+            score += 40; 
         } 
         // Next: Normalized AKA Title only (if year doesn't match or not available)
         else if (akaTitle && normalizedItemTitle.includes(akaTitle)) {
-            score += 5; // Base score for aka title match
+            score += 20; 
         }
     }
     
-    // Penalize if the torrent title contains an obvious different year when metadata year is known
-    if (metadata.year && itemYearMatch && itemYearMatch !== metadata.year) {
-        // Only penalize if it seemed like it was trying to match the title
-        if (normalizedItemTitle.includes(normalizedPrimaryTitle) || normalizedAkaTitles.some(t => normalizedItemTitle.includes(t))) {
-             score -= 20; // Penalize for wrong year
-        }
-    }
-
     // Boost for exact normalized title match (whole string) if available - can be a strong indicator
     if (normalizedPrimaryTitle && normalizedItemTitle === normalizedPrimaryTitle) { 
-        score += 5;
+        score += 10;
     }
 
     // Boost if item title contains IMDB/TMDB ID (especially for ID-based queries)
-    if (metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase())) {
-        score += 1;
+    if (metadata.imdbId && normalizedItemTitle.includes(normalizeString(metadata.imdbId, true))) {
+        score += 15;
     }
-    if (metadata.tmdbId && normalizedItemTitle.includes(metadata.tmdbId.toString())) {
-        score += 0.5;
+    if (metadata.tmdbId && normalizedItemTitle.includes(normalizeString(metadata.tmdbId.toString(), true))) {
+        score += 10;
     }
 
+    // Penalize if the torrent title contains an obvious different year when metadata year is known
+    if (metadata.year && itemYearMatch && itemYearMatch !== metadata.year) {
+        if (normalizedItemTitle.includes(normalizedPrimaryTitle) || normalizedAkaTitles.some(t => normalizedItemTitle.includes(t))) {
+             score -= 30; // Stronger penalty for wrong year on a matched title
+        }
+    }
 
-    // Ensure score doesn't go negative, though it should ideally be positive for valid items.
+    // Small boost for more seeders (general quality)
+    score += Math.min(item.Seeders / 10, 5); // Max 5 points for seeders
+
     return Math.max(0, score);
 };
 
 /**
  * Validates a Jackett result against expected metadata and user preferences.
+ * This is now much stricter for ID-based queries.
  * @param {object} item - The raw Jackett torrent item.
  * @param {object} metadata - The metadata object (title, year, akaTitles, tmdbId, imdbId) obtained from OMDB/TMDB.
  * @param {boolean} wasIdQuery - True if the Jackett query was primarily an IMDB/TMDB ID search.
+ * @param {object} config - The addon's current configuration (for preferences).
  * @returns {boolean} True if the item passes validation, false otherwise.
  */
-const validateJackettResult = (item, metadata, wasIdQuery) => {
-  const normalizedItemTitle = normalizeString(item.Title, true); // Use aggressive normalization for validation
-  const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null; // Use word boundary for year
+const validateJackettResult = (item, metadata, wasIdQuery, config) => {
+  const normalizedItemTitle = normalizeString(item.Title, true); 
+  const itemYearMatch = item.Title ? (item.Title.match(/\b(\d{4})\b/) ? item.Title.match(/\b(\d{4})\b/)[1] : null) : null;
 
-  // 1. Basic check: Ensure MagnetUri exists.
+  // 1. Basic check: Ensure MagnetUri and valid infoHash. parseTorrent will check this later more robustly.
   if (!item.MagnetUri) {
     log.debug(`Validation failed: Missing MagnetUri for "${item.Title}"`);
     return false;
   }
 
-  // 2. Title/AKA Title/Year Match (Crucial for relevance)
+  // 2. Title/AKA Title/Year/ID Match (Crucial for relevance)
   let passesTitleMatch = false;
   let debugReason = '';
 
   const normalizedPrimaryTitle = normalizeString(metadata.title, true);
   const normalizedAkaTitles = (metadata.akaTitles || []).map(t => normalizeString(t, true));
+  
+  // Check if primary title or any aka title exists in the normalized item title
+  const hasStrongTitleOverlap = [normalizedPrimaryTitle, ...normalizedAkaTitles].some(t => {
+    // Require at least 50% match for shorter titles, or presence of full title for longer ones
+    if (!t) return false;
+    if (t.length > 5 && normalizedItemTitle.includes(t)) return true; // Full title match
+    if (t.length <= 5 && normalizedItemTitle.includes(t)) return true; // Short exact match
+    return false;
+  });
+
+  const containsImdbId = metadata.imdbId && normalizedItemTitle.includes(normalizeString(metadata.imdbId, true));
+  const containsTmdbId = metadata.tmdbId && normalizedItemTitle.includes(normalizeString(metadata.tmdbId.toString(), true));
+  
+  const yearMatches = (metadata.year && itemYearMatch) ? (parseInt(itemYearMatch, 10) === parseInt(metadata.year, 10)) : true;
 
   if (wasIdQuery) {
-    // If original query was by ID (IMDB/TMDB), we expect a strong connection.
-    // It must match a normalized title (primary or aka) AND year (if present) OR contain the IMDB/TMDB ID directly.
-    const titleMatchesPrimaryOrAka = [normalizedPrimaryTitle, ...normalizedAkaTitles].some(t => t && normalizedItemTitle.includes(t));
-    const yearMatches = (metadata.year && itemYearMatch) ? (itemYearMatch === metadata.year) : true; // If no year info, it passes
-
-    const containsImdbId = metadata.imdbId && normalizedItemTitle.includes(metadata.imdbId.toLowerCase());
-    const containsTmdbId = metadata.tmdbId && normalizedItemTitle.includes(metadata.tmdbId.toString());
-
-    if ((titleMatchesPrimaryOrAka && yearMatches) || containsImdbId || containsTmdbId) {
+    // For ID-based queries, be very strict. Must contain ID OR a very strong title+year match.
+    if (containsImdbId || containsTmdbId) {
+        // If ID is present, we still need some title overlap to avoid generic ID false positives.
+        // Or if no title metadata was resolved at all (e.g., obscure title).
+        if (hasStrongTitleOverlap || (!metadata.title && !metadata.akaTitles.length)) {
+            passesTitleMatch = true;
+            debugReason = `ID Query: Matched ID (${metadata.imdbId || metadata.tmdbId}) in torrent title.`;
+        } else {
+            debugReason = `ID Query: ID present but insufficient title match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}".`;
+        }
+    } else if (hasStrongTitleOverlap && yearMatches) {
+        // If no ID is found in the title, but there's a strong title+year match, still accept.
         passesTitleMatch = true;
-        if (titleMatchesPrimaryOrAka && yearMatches) debugReason = "ID Query: Title/AKA/Year Match";
-        else if (containsImdbId) debugReason = "ID Query: IMDB ID in torrent title";
-        else if (containsTmdbId) debugReason = "ID Query: TMDB ID in torrent title";
+        debugReason = `ID Query: Strong Title/AKA/Year Match (without explicit ID in torrent title) for "${metadata.title}" (${metadata.year}).`;
+    } else {
+        debugReason = `ID Query: No ID match and insufficient title/year match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}".`;
     }
 
     if (!passesTitleMatch) {
-        log.debug(`Validation failed: ID-based query, insufficient title/year/ID match for "${item.Title}". Expected normalized variations of "${normalizedPrimaryTitle}" (${metadata.year}) or IMDB ID "${metadata.imdbId}" / TMDB ID "${metadata.tmdbId}". (Reason: ${debugReason})`);
-        return false; // **CRITICAL FIX: Return false if ID query validation fails.**
+        log.debug(`Validation failed: ${debugReason}`);
+        return false; 
     } else {
-        log.debug(`Validation passed: ID-based query match for "${item.Title}". (Reason: ${debugReason})`);
+        log.debug(`Validation passed: ${debugReason}`);
     }
 
-  } else { // Original query was title-based (e.g., from search box or catalog click)
+  } else { // Original query was title-based (e.g., from search box or catalog click without specific ID)
     
-    // Prioritize exact or strong title + year match
-    if (normalizedPrimaryTitle && metadata.year && normalizedItemTitle.includes(normalizedPrimaryTitle) && itemYearMatch === metadata.year) {
+    // For title-based queries, strict title/year match is paramount
+    if (normalizedPrimaryTitle && metadata.year && normalizedItemTitle.includes(normalizedPrimaryTitle) && yearMatches) {
         passesTitleMatch = true;
-        debugReason = "Exact Title+Year Match";
+        debugReason = "Title-based: Exact Title+Year Match";
     } else if (normalizedAkaTitles.length > 0) {
         for (const akaTitle of normalizedAkaTitles) {
-            if (normalizedItemTitle.includes(akaTitle)) {
-                if (metadata.year && itemYearMatch && itemYearMatch === metadata.year) {
+            if (akaTitle && normalizedItemTitle.includes(akaTitle)) {
+                if (metadata.year && yearMatches) {
                     passesTitleMatch = true;
-                    debugReason = "AKA Title+Year Match";
+                    debugReason = "Title-based: AKA Title+Year Match";
                     break;
-                } else if (!metadata.year) { // AKA title matches, and no year info from metadata
+                } else if (!metadata.year) { // AKA title matches, and no year info from metadata to check against
                     passesTitleMatch = true;
-                    debugReason = "AKA Title Match, no year metadata";
+                    debugReason = "Title-based: AKA Title Match, no year metadata to compare.";
                     break;
                 }
             }
@@ -572,7 +581,7 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
     // Fallback to just primary title match if no strong match found (only if metadata title is available)
     if (!passesTitleMatch && normalizedPrimaryTitle && normalizedItemTitle.includes(normalizedPrimaryTitle)) {
         passesTitleMatch = true;
-        debugReason = "Basic Title Match";
+        debugReason = "Title-based: Basic Title Match (no year check or AKA)";
     }
     
     if (!passesTitleMatch) {
@@ -583,27 +592,26 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
     }
   }
 
-  // At this point, title match has passed (either wasIdQuery logic or !wasIdQuery logic).
-  // Now apply user preferences filters.
+  // At this point, title/ID relevance match has passed.
+  // Now apply user preferences filters from CURRENT_CONFIG.
 
-  // Validate against user preferences (resolution, language, size)
   const itemResolution = extractResolution(item.Title) || 'Unknown';
   const itemLanguage = extractLanguage(item.Title) || 'Unknown';
   const itemSize = item.Size || 0;
 
-  const passesSize = DEFAULT_CONFIG.maxSize === 0 || itemSize <= DEFAULT_CONFIG.maxSize;
-  const passesResolution = DEFAULT_CONFIG.preferredResolutions.length === 0 ||
-                           DEFAULT_CONFIG.preferredResolutions.includes(itemResolution) ||
-                           itemResolution === 'Unknown';
-  const passesLanguage = DEFAULT_CONFIG.preferredLanguages.length === 0 ||
-                         DEFAULT_CONFIG.preferredLanguages.includes(itemLanguage) ||
-                         itemLanguage === 'Unknown';
+  const passesSize = config.maxSize === 0 || itemSize <= config.maxSize;
+  const passesResolution = config.preferredResolutions.length === 0 ||
+                           config.preferredResolutions.includes(itemResolution) ||
+                           itemResolution === 'Unknown'; // Allow unknown if no specific preference
+  const passesLanguage = config.preferredLanguages.length === 0 ||
+                         config.preferredLanguages.includes(itemLanguage) ||
+                         itemLanguage === 'Unknown'; // Allow unknown if no specific preference
 
-  if (!passesSize) log.debug(`Validation failed: Size (${formatBytes(itemSize)}) exceeds max size (${formatBytes(DEFAULT_CONFIG.maxSize)}) for "${item.Title}"`);
-  if (!passesResolution) log.debug(`Validation failed: Resolution (${itemResolution}) not preferred for "${item.Title}"`);
-  if (!passesLanguage) log.debug(`Validation failed: Language (${itemLanguage}) not preferred for "${item.Title}"`);
+  if (!passesSize) log.debug(`Validation failed: Size (${formatBytes(itemSize)}) exceeds max size (${formatBytes(config.maxSize)}) for "${item.Title}"`);
+  if (!passesResolution) log.debug(`Validation failed: Resolution (${itemResolution}) not preferred for "${item.Title}" (Preferred: ${config.preferredResolutions.join(',')})`);
+  if (!passesLanguage) log.debug(`Validation failed: Language (${itemLanguage}) not preferred for "${item.Title}" (Preferred: ${config.preferredLanguages.join(',')})`);
 
-  return passesSize && passesResolution && passesLanguage; // All preference filters must pass
+  return passesSize && passesResolution && passesLanguage; 
 };
 
 // --- Stremio Addon Endpoints ---
@@ -611,11 +619,52 @@ const validateJackettResult = (item, metadata, wasIdQuery) => {
 // Manifest endpoint
 app.get('/manifest.json', (req, res) => {
   log.info('Manifest requested');
+
+  // Update CURRENT_CONFIG based on query parameters from Stremio's config UI
+  const {
+      jackettHost = CURRENT_CONFIG.jackettUrl,
+      jackettApiKey = CURRENT_CONFIG.jackettApiKey,
+      omdbApiKey = CURRENT_CONFIG.omdbApiKey,
+      tmdbApiKey = CURRENT_CONFIG.tmdbApiKey,
+      preferredResolutions = CURRENT_CONFIG.preferredResolutions.join(','),
+      preferredLanguages = CURRENT_CONFIG.preferredLanguages.join(','),
+      maxResults = CURRENT_CONFIG.maxResults.toString(),
+      maxSize = CURRENT_CONFIG.maxSize.toString(),
+      logLevel = CURRENT_CONFIG.logLevel,
+      publicTrackersUrl = CURRENT_CONFIG.publicTrackersUrl,
+      filterBySeeders = CURRENT_CONFIG.filterBySeeders.toString(), // New config
+      sortBy = CURRENT_CONFIG.sortBy // New config
+  } = req.query;
+
+  CURRENT_CONFIG = {
+      jackettUrl: jackettHost,
+      jackettApiKey: jackettApiKey,
+      omdbApiKey: omdbApiKey,
+      tmdbApiKey: tmdbApiKey,
+      preferredResolutions: preferredResolutions.split(',').map(item => item.trim()).filter(Boolean),
+      preferredLanguages: preferredLanguages.split(',').map(item => item.trim()).filter(Boolean),
+      maxResults: parseInt(maxResults, 10),
+      maxSize: parseInt(maxSize, 10),
+      logLevel: logLevel,
+      publicTrackersUrl: publicTrackersUrl,
+      filterBySeeders: parseInt(filterBySeeders, 10),
+      sortBy: sortBy,
+  };
+
+  // Initial fetch of trackers with the potentially updated URL
+  fetchAndCachePublicTrackers(CURRENT_CONFIG.publicTrackersUrl);
+
+  // Jackett Category mappings based on content type
+  const JACKETT_CATEGORIES = {
+    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
+    series: '5000,5030,5040,5045,105000,105040,105030,105045'
+  };
+
   res.json({
-    id: 'community.stremio.jackettaddon',
-    version: '1.0.0',
-    name: 'Jackett Enhanced Addon (Node.js)',
-    description: 'Advanced filtering for your Stremio experience via Jackett. (Node.js version)',
+    id: 'community.stremio.jackettaddon.enhanced', // Changed ID for clarity
+    version: '1.0.1', // Incremented version
+    name: 'Jackett Enhanced Streams',
+    description: 'Advanced filtering and reliable torrent streaming via Jackett, with comprehensive configuration options.',
     resources: ['catalog', 'stream'],
     types: ['movie', 'series'],
     catalogs: [
@@ -632,56 +681,150 @@ app.get('/manifest.json', (req, res) => {
         extra: [{ name: 'search', isRequired: false }],
       },
     ],
-    idPrefixes: ['tt'], // Assuming we can extract IMDB IDs from Jackett results
-    logo: 'https://placehold.co/256x256/007bff/ffffff?text=JA', // Placeholder logo
+    idPrefixes: ['tt'], 
+    logo: 'https://placehold.co/256x256/007bff/ffffff?text=JE', // Placeholder logo
+    behaviorHints: {
+        configurable: true,
+        configuration: [
+            {
+                key: 'jackettHost',
+                type: 'text',
+                title: 'Jackett Host URL (e.g., http://localhost:9117)',
+                required: true,
+                default: CURRENT_CONFIG.jackettUrl
+            },
+            {
+                key: 'jackettApiKey',
+                type: 'text',
+                title: 'Jackett API Key',
+                required: true,
+                default: CURRENT_CONFIG.jackettApiKey
+            },
+            {
+                key: 'omdbApiKey',
+                type: 'text',
+                title: 'OMDb API Key (optional, for metadata)',
+                required: false,
+                default: CURRENT_CONFIG.omdbApiKey
+            },
+            {
+                key: 'tmdbApiKey',
+                type: 'text',
+                title: 'TMDb API Key (optional, for metadata & AKA titles)',
+                required: false,
+                default: CURRENT_CONFIG.tmdbApiKey
+            },
+            {
+                key: 'preferredResolutions',
+                type: 'text',
+                title: 'Preferred Resolutions (comma-separated, e.g., 2160p,1080p)',
+                required: false,
+                default: CURRENT_CONFIG.preferredResolutions.join(',')
+            },
+            {
+                key: 'preferredLanguages',
+                type: 'text',
+                title: 'Preferred Languages (comma-separated, e.g., Tamil,English)',
+                required: false,
+                default: CURRENT_CONFIG.preferredLanguages.join(',')
+            },
+            {
+                key: 'maxResults',
+                type: 'number',
+                title: 'Max Results to Show (default: 50, Max: 100)',
+                required: false,
+                default: CURRENT_CONFIG.maxResults.toString(),
+                min: 1,
+                max: 100
+            },
+            {
+                key: 'maxSize',
+                type: 'number',
+                title: 'Max Torrent Size in Bytes (0 for no limit)',
+                required: false,
+                default: CURRENT_CONFIG.maxSize.toString(),
+                min: 0
+            },
+            {
+                key: 'filterBySeeders',
+                type: 'number',
+                title: 'Minimum Seeders (optional)',
+                required: false,
+                default: CURRENT_CONFIG.filterBySeeders.toString(),
+                min: 0
+            },
+            {
+                key: 'sortBy',
+                type: 'select',
+                title: 'Sort By',
+                options: [
+                    { value: 'seeders', label: 'Most Seeders' },
+                    { value: 'publishAt', label: 'Recently Published' },
+                    { value: 'score', label: 'Best Match Score' } // New sorting option
+                ],
+                required: false,
+                default: CURRENT_CONFIG.sortBy
+            },
+            {
+                key: 'publicTrackersUrl',
+                type: 'text',
+                title: 'GitHub Raw URL for Public Trackers (optional)',
+                description: 'e.g., https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_all.txt',
+                required: false,
+                default: CURRENT_CONFIG.publicTrackersUrl
+            },
+            {
+                key: 'logLevel',
+                type: 'select',
+                title: 'Logging Level',
+                options: [
+                    { value: 'debug', label: 'Debug' },
+                    { value: 'info', label: 'Info' },
+                    { value: 'warn', label: 'Warning' },
+                    { value: 'error', label: 'Error' },
+                    { value: 'silent', label: 'Silent' }
+                ],
+                required: false,
+                default: CURRENT_CONFIG.logLevel
+            }
+        ]
+    }
   });
 });
-
-// Endpoint to expose current configuration for the web UI
-app.get('/config', (req, res) => {
-  // Return a copy of the current effective configuration
-  // Mask the API keys for security
-  const displayConfig = { ...DEFAULT_CONFIG };
-  displayConfig.jackettApiKey = displayConfig.jackettApiKey === 'YOUR_JACKETT_API_KEY' ? 'YOUR_JACKETT_API_KEY' : '******** (hidden)';
-  displayConfig.omdbApiKey = displayConfig.omdbApiKey === 'YOUR_OMDB_API_KEY' ? 'YOUR_OMDB_API_KEY' : '******** (hidden)';
-  displayConfig.tmdbApiKey = displayConfig.tmdbApiKey === 'YOUR_TMDB_API_KEY' ? 'YOUR_TMDB_API_KEY' : '******** (hidden)';
-  res.json(displayConfig);
-});
-
 
 // Catalog endpoint (handles search)
 app.get('/catalog/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
-  const { search, skip } = req.query; // Stremio sends 'search' and 'skip' parameters
+  const { search, skip } = req.query; 
 
   log.info(`Catalog requested: Type=${type}, ID=${id}, Search=${search}, Skip=${skip}`);
+
+  // Re-read config for this request, as it might have been updated via manifest
+  const config = { ...CURRENT_CONFIG }; 
 
   let jackettSearchQuery = search;
   let jackettSearchParams = { cat: JACKETT_CATEGORIES[type] }; // Use new category mapping
   let metadataForValidation = {};
-  let wasIdQueryForValidation = false; // Flag to indicate if original query was ID based
+  let wasIdQueryForValidation = false; 
+  const JACKETT_CATALOG_FETCH_LIMIT = 100; // Fetch more for catalog to allow better filtering
 
-  // If Stremio provides an IMDB ID for the catalog, try to use it for a more precise search
   if (id.startsWith('tt') && !search) { 
     log.debug(`IMDB ID detected for catalog: ${id}. Attempting metadata lookup for initial search query.`);
-    metadataForValidation = await fetchMetadataFromOmdbTmdb(id);
-    metadataForValidation.imdbId = id; // Store IMDB ID in metadata for validation
-    wasIdQueryForValidation = true; // Mark as ID query
+    metadataForValidation = await fetchMetadataFromOmdbTmdb(id, config.omdbApiKey, config.tmdbApiKey);
+    metadataForValidation.imdbId = id; 
+    wasIdQueryForValidation = true; 
     if (metadataForValidation.title) {
-      jackettSearchQuery = metadataForValidation.title; // Use the main title for the catalog search
-      jackettSearchParams.imdbid = id; // Also pass IMDB ID to Jackett if it supports it directly
+      jackettSearchQuery = metadataForValidation.title; 
+      jackettSearchParams.imdbid = id; 
     } else {
       log.warn(`Could not get title for IMDB ID ${id} for catalog. Falling back to using IMDB ID as query.`);
-      jackettSearchQuery = id; // Fallback to IMDB ID itself as query
+      jackettSearchQuery = id; 
     }
   } else if (id.startsWith('jackett:')) {
-     // Custom ID from our catalog, extract original title
-     jackettSearchQuery = id.substring('jackett:'.length).split('-').slice(0, -1).join(' ');
-     // For custom Jackett IDs, metadata is not directly available, so assume title-based query
+     jackettSearchQuery = decodeURIComponent(id.substring('jackett:'.length).split('-').slice(0, -1).join(' '));
      metadataForValidation = { title: jackettSearchQuery };
      wasIdQueryForValidation = false;
   } else {
-    // If it's a direct search query from Stremio (not an IMDB ID), set metadata for validation
     metadataForValidation = { title: search };
     wasIdQueryForValidation = false;
   }
@@ -691,71 +834,98 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
     return res.json({ metas: [] });
   }
 
-  jackettSearchParams.q = jackettSearchQuery; // Set the main query parameter
+  // Combine query methods for robustness in catalog search
+  let queries = [jackettSearchQuery];
+  if (metadataForValidation.imdbId) queries.push(metadataForValidation.imdbId);
+  if (metadataForValidation.tmdbId) queries.push(metadataForValidation.tmdbId.toString());
+  if (metadataForValidation.akaTitles && metadataForValidation.akaTitles.length > 0) {
+      queries = queries.concat(metadataForValidation.akaTitles);
+  }
+  queries = [...new Set(queries.filter(q => q && q.trim() !== ''))]; // Deduplicate and clean
+
+  let allJackettResults = [];
+  for (const q of queries) {
+      try {
+          const params = { ...jackettSearchParams, q: q };
+          if (q.startsWith('tt')) params.imdbid = q; // If query itself is an IMDB ID
+          if (q.startsWith('tmdb')) params.tmdbid = q.substring(4); // Simple tmdb ID
+          
+          const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_CATALOG_FETCH_LIMIT);
+          if (jackettResponse && jackettResponse.Results) {
+              allJackettResults = allJackettResults.concat(jackettResponse.Results);
+          }
+      } catch (error) {
+          log.warn(`Error during catalog Jackett search for "${q}": ${error.message}`);
+      }
+  }
+  
+  // Deduplicate all results
+  const seenGuids = new Set();
+  allJackettResults = allJackettResults.filter(item => {
+      if (seenGuids.has(item.MagnetUri)) { // Using MagnetUri as a proxy for GUID if not available
+          return false;
+      }
+      seenGuids.add(item.MagnetUri);
+      return true;
+  });
+
 
   try {
-    const jackettResponse = await fetchJackettResults(jackettSearchParams, DEFAULT_CONFIG);
-
     let processedLinks = [];
-    if (jackettResponse && jackettResponse.Results) {
-      // Filter results for quality and preferences before sorting and slicing
-      const validatedResults = jackettResponse.Results.filter(item => 
-        validateJackettResult(item, metadataForValidation, wasIdQueryForValidation)
+    if (allJackettResults.length > 0) {
+      // Filter results for quality and preferences before sorting
+      const validatedResults = allJackettResults.filter(item => 
+        validateJackettResult(item, metadataForValidation, wasIdQueryForValidation, config)
       );
 
-      // Calculate match score for each validated item in catalog
       const resultsWithScore = validatedResults.map(item => {
-          // Add detailed properties for sorting
           const resolution = extractResolution(item.Title) || 'Unknown';
           const language = extractLanguage(item.Title) || 'Unknown';
 
           return {
               item, 
-              id: `jackett:${item.Title.replace(/\s+/g, '-')}-${item.Seeders}`,
+              id: `jackett:${encodeURIComponent(item.Title.replace(/\s+/g, '-'))}-${item.Seeders}`,
               type: type,
               name: item.Title,
-              poster: `https://placehold.co/200x300/007bff/ffffff?text=${encodeURIComponent(item.Title.substring(0,10))}`,
-              description: `Size: ${formatBytes(item.Size || 0)} | Seeders: ${item.Seeders || 0} | Leechers: ${item.Leechers || 0} | Resolution: ${resolution || 'Unknown'} | Language: ${language || 'Unknown'}`,
+              poster: `https://placehold.co/200x300/007bff/ffffff?text=${encodeURIComponent(item.Title.substring(0, Math.min(item.Title.length, 10)))}`,
+              description: `Size: ${formatBytes(item.Size || 0)} | S: ${item.Seeders || 0} | L: ${item.Leechers || 0} | Res: ${resolution} | Lang: ${language}`,
               originalSeeders: item.Seeders || 0,
               originalSize: item.Size || 0,
               resolution: resolution,
               language: language,
-              score: calculateMatchScore(item, metadataForValidation), // Calculate score here
+              score: calculateMatchScore(item, metadataForValidation),
+              publishDate: new Date(item.PublishDate || 0)
           };
-      }).filter(Boolean); // Ensure no nulls are passed due to missing MagnetUri
+      }).filter(Boolean); 
 
-      // Sort results based on new scoring for catalog
+      // Sort results based on user config and new scoring for catalog
       processedLinks = resultsWithScore.sort((a, b) => {
-        // 1. Sort by Match Score (highest first)
-        if (b.score !== a.score) {
+        // 1. Sort by Match Score (highest first) if sortBy is 'score'
+        if (config.sortBy === 'score' && b.score !== a.score) {
             return b.score - a.score;
         }
-        // 2. Then by PublishDate (latest first)
-        const dateA = new Date(a.item.PublishDate || 0);
-        const dateB = new Date(b.item.PublishDate || 0);
-        if (dateB.getTime() !== dateA.getTime()) {
-          return dateB.getTime() - dateA.getTime();
+        // 2. Then by seeders (more seeders first) if sortBy is 'seeders'
+        if (config.sortBy === 'seeders' && b.originalSeeders !== a.originalSeeders) {
+          return b.originalSeeders - a.originalSeeders;
         }
-        // 3. Then by preferred resolution (higher preference first)
-        const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
-        const aResIndex = resOrder.indexOf(a.resolution);
-        const bResIndex = resOrder.indexOf(b.resolution);
-        if (aResIndex !== bResIndex) {
-          return aResIndex - bResIndex;
+        // 3. Then by PublishDate (latest first) if sortBy is 'publishAt'
+        if (config.sortBy === 'publishAt' && a.publishDate.getTime() !== b.publishDate.getTime()) {
+          return b.publishDate.getTime() - a.publishDate.getTime();
         }
-        // 4. Finally by seeders (more seeders first)
-        return b.originalSeeders - a.originalSeeders;
+        // Fallback sorting: Score, then Seeders, then PublishDate
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
+        return b.publishDate.getTime() - a.publishDate.getTime();
       })
-      .slice(0, DEFAULT_CONFIG.maxResults); // Apply maxResults after full sorting and filtering
+      .slice(0, config.maxResults); // Apply maxResults after full sorting and filtering
       
-      // Implement pagination based on 'skip'
       const start = parseInt(skip || '0', 10);
-      const end = start + 100; // Stremio requests 100 items per page
+      const end = start + 100; 
       const paginatedResults = processedLinks.slice(start, end);
 
       res.json({ metas: paginatedResults });
     } else {
-      log.info('No results found from Jackett for catalog request.');
+      log.info('No results found from Jackett for catalog request after filtering.');
       res.json({ metas: [] });
     }
   } catch (error) {
@@ -766,164 +936,254 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
 
 // Stream endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
-  const { type, id } = req.params; // id here is the videoId (e.g., 'tt1234567' or 'jackett:Movie-Title-102000')
+  const { type, id } = req.params; 
 
   log.info(`Stream requested: Type=${type}, ID=${id}`);
 
-  if (!DEFAULT_CONFIG.jackettUrl || DEFAULT_CONFIG.jackettApiKey === 'YOUR_JACKETT_API_KEY') {
+  // Re-read config for this request, as it might have been updated via manifest
+  const config = { ...CURRENT_CONFIG }; 
+
+  if (!config.jackettUrl || config.jackettApiKey === 'YOUR_JACKETT_API_KEY') {
     log.error('Jackett URL or API Key not configured. Cannot retrieve streams.');
     return res.status(500).json({ error: 'Jackett configuration missing.' });
   }
 
   let metadata = {};
-  let jackettSearchQueries = []; // Array of search parameter objects for Jackett
-  let wasIdQuery = false; // Flag to indicate if the primary search was based on an ID
+  let allJackettResults = [];
+  const category = JACKETT_CATEGORIES[type]; // Make sure JACKETT_CATEGORIES is defined globally or derived
+  let wasIdQuery = false; 
+  const JACKETT_STREAM_FETCH_LIMIT = 200; // Fetch more for streams to get best options
 
-  if (id.startsWith('tt')) { // IMDB ID
-    log.debug(`IMDB ID detected: ${id}. Attempting metadata lookup.`);
-    metadata = await fetchMetadataFromOmdbTmdb(id);
-    metadata.imdbId = id; // Store IMDB ID in metadata for validation
-    wasIdQuery = true; // Mark as ID query
-    
-    // Construct search queries based on metadata with fallback strategy
-    const category = JACKETT_CATEGORIES[type];
+  // Define JACKETT_CATEGORIES here as it's used directly in the stream endpoint
+  const JACKETT_CATEGORIES = {
+    movie: '2000,2030,2040,2045,2060,102000,102060,102040,102030,102045',
+    series: '5000,5030,5040,5045,105000,105040,105030,105045'
+  };
 
-    // 1. Title
-    if (metadata.title) {
-        jackettSearchQueries.push({ q: metadata.title, cat: category });
-        // 2. Title + Year
-        if (metadata.year) {
-            jackettSearchQueries.push({ q: `${metadata.title} ${metadata.year}`, cat: category });
+
+  let baseImdbId = id.split(':')[0]; // Extract base IMDb ID from Stremio's ID
+  let season = null;
+  let episode = null;
+
+  // For series, try to extract season and episode
+  if (type === 'series') {
+      const parts = id.split(':');
+      if (parts.length >= 3) {
+          season = parseInt(parts[1], 10);
+          episode = parseInt(parts[2], 10);
+          log.debug(`Detected Season: ${season}, Episode: ${episode}`);
+      }
+  }
+
+
+  if (baseImdbId.startsWith('tt')) { 
+    log.debug(`IMDB ID detected: ${baseImdbId}. Attempting metadata lookup.`);
+    metadata = await fetchMetadataFromOmdbTmdb(baseImdbId, config.omdbApiKey, config.tmdbApiKey);
+    metadata.imdbId = baseImdbId; 
+    wasIdQuery = true; 
+
+    // --- Prioritized Jackett Queries ---
+    // 1. Try IMDB ID search first
+    if (metadata.imdbId) {
+        log.debug(`Attempting Jackett search by IMDB ID: ${metadata.imdbId}`);
+        try {
+            const params = { imdbid: metadata.imdbId, cat: category };
+            if (season) params.season = season;
+            if (episode) params.ep = episode;
+            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+            if (jackettResponse && jackettResponse.Results && jackettResponse.Results.length > 0) {
+                allJackettResults = allJackettResults.concat(jackettResponse.Results);
+                log.debug(`Found ${jackettResponse.Results.length} results via IMDB ID.`);
+            } else {
+                log.debug(`No direct results for IMDB ID ${metadata.imdbId}.`);
+            }
+        } catch (error) {
+            log.warn(`Error during IMDB ID search for ${metadata.imdbId}: ${error.message}`);
         }
     }
-    
-    // 3. AKA Titles
-    if (metadata.akaTitles && metadata.akaTitles.length > 0) {
-        metadata.akaTitles.forEach(akaTitle => {
-            jackettSearchQueries.push({ q: akaTitle, cat: category });
-            // 4. AKA Titles + Year
-            if (metadata.year) {
-                jackettSearchQueries.push({ q: `${akaTitle} ${metadata.year}`, cat: category });
+
+    // 2. If not enough results, try TMDB ID search (if available)
+    if (allJackettResults.length < config.maxResults && metadata.tmdbId) {
+        log.debug(`Attempting Jackett search by TMDB ID: ${metadata.tmdbId}`);
+        try {
+            const params = { tmdbid: metadata.tmdbId, cat: category };
+            if (season) params.season = season;
+            if (episode) params.ep = episode;
+            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+            if (jackettResponse && jackettResponse.Results && jackettResponse.Results.length > 0) {
+                allJackettResults = allJackettResults.concat(jackettResponse.Results);
+                log.debug(`Found ${jackettResponse.Results.length} results via TMDB ID.`);
+            } else {
+                log.debug(`No direct results for TMDB ID ${metadata.tmdbId}.`);
             }
-        });
+        } catch (error) {
+            log.warn(`Error during TMDB ID search for ${metadata.tmdbId}: ${error.message}`);
+        }
     }
 
-    // 5. IMDB ID as direct search (Jackett supports this)
-    jackettSearchQueries.push({ imdbid: id, cat: category });
-    
-    // 6. TMDB ID as direct search (Jackett supports this)
-    if (metadata.tmdbId) {
-        jackettSearchQueries.push({ tmdbid: metadata.tmdbId, cat: category });
+    // 3. Fallback to title-based search if still not enough results or no IDs available
+    if (allJackettResults.length < config.maxResults && metadata.title) {
+        log.debug(`Falling back to title-based Jackett search for "${metadata.title}"`);
+        let titleQueries = [];
+        // Prioritize queries with season/episode for series
+        if (type === 'series' && season && episode) {
+            titleQueries.push(`${metadata.title} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
+            titleQueries.push(`${metadata.title} Season ${season} Episode ${episode}`);
+        }
+        if (metadata.year) {
+            titleQueries.push(`${metadata.title} ${metadata.year}`);
+        }
+        titleQueries.push(metadata.title);
+        
+        if (metadata.akaTitles && metadata.akaTitles.length > 0) {
+            metadata.akaTitles.forEach(akaTitle => {
+                if (type === 'series' && season && episode) {
+                    titleQueries.push(`${akaTitle} S${String(season).padStart(2, '0')}E${String(episode).padStart(2, '0')}`);
+                }
+                if (metadata.year) {
+                    titleQueries.push(`${akaTitle} ${metadata.year}`);
+                }
+                titleQueries.push(akaTitle);
+            });
+        }
+        
+        titleQueries = [...new Set(titleQueries.filter(q => q && q.trim() !== ''))]; // Deduplicate and clean
+
+        for (const q of titleQueries) {
+            try {
+                const params = { q: q, cat: category };
+                // Add season/ep to query params for general search if available
+                if (type === 'series' && season && episode) {
+                    params.season = season;
+                    params.ep = episode;
+                }
+                const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+                if (jackettResponse && jackettResponse.Results) {
+                    allJackettResults = allJackettResults.concat(jackettResponse.Results);
+                    if (allJackettResults.length >= JACKETT_STREAM_FETCH_LIMIT) { // Stop fetching if we have enough raw results
+                        log.debug(`Reached stream fetch limit (${JACKETT_STREAM_FETCH_LIMIT}) during title fallback.`);
+                        break;
+                    }
+                }
+            } catch (error) {
+                log.warn(`Failed to fetch Jackett results for fallback query "${q}": ${error.message}`);
+            }
+        }
     }
 
-    // Ensure there's at least one query, even if metadata lookup fails
-    if (jackettSearchQueries.length === 0) {
-        log.warn(`No specific metadata found for IMDB ID ${id}. Falling back to using IMDB ID as query.`);
-        jackettSearchQueries.push({ q: id, cat: category });
-        // Even if we query with IMDB ID as 'q', it's still fundamentally an ID-based query
-        // so `wasIdQuery` should remain true.
+    // Ensure there's at least one query even if metadata lookup and specific ID searches fail
+    if (allJackettResults.length === 0 && (!metadata.imdbId && !metadata.tmdbId && !metadata.title)) {
+        log.warn(`No specific metadata found for IMDB ID ${baseImdbId}. Falling back to using IMDB ID as general query.`);
+        try {
+            const params = { q: baseImdbId, cat: category };
+            if (type === 'series' && season && episode) {
+                params.season = season;
+                params.ep = episode;
+            }
+            const jackettResponse = await fetchJackettResults(params, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+            if (jackettResponse && jackettResponse.Results) {
+                allJackettResults = allJackettResults.concat(jackettResponse.Results);
+            }
+        } catch (error) {
+            log.warn(`Error during final fallback IMDB ID as query: ${error.message}`);
+        }
     }
 
   } else if (id.startsWith('jackett:')) {
-    // Custom ID from our catalog, extract original title
-    const originalTitle = id.substring('jackett:'.length).split('-').slice(0, -1).join(' ');
-    jackettSearchQueries.push({ q: originalTitle, cat: JACKETT_CATEGORIES[type] });
-    // For custom Jackett IDs, metadata is not directly available, so assume title-based query
-    metadata = { title: originalTitle };
+    const originalTitle = decodeURIComponent(id.substring('jackett:'.length).split('-').slice(0, -1).join(' '));
+    log.debug(`Custom Jackett ID detected. Searching by original title: "${originalTitle}"`);
+    const jackettResponse = await fetchJackettResults({ q: originalTitle, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+    allJackettResults = jackettResponse?.Results || [];
+    metadata = { title: originalTitle }; 
     wasIdQuery = false;
   } else {
-    // Fallback for other IDs (e.g., if Stremio sends a generic title directly)
     log.warn(`Non-IMDB/Jackett custom ID received: ${id}. Using ID directly as search query.`);
-    jackettSearchQueries.push({ q: id, cat: JACKETT_CATEGORIES[type] });
-    // Assume title-based query for direct ID for now
-    metadata = { title: id };
+    const jackettResponse = await fetchJackettResults({ q: id, cat: category }, config.jackettUrl, config.jackettApiKey, JACKETT_STREAM_FETCH_LIMIT);
+    allJackettResults = jackettResponse?.Results || [];
+    metadata = { title: id }; 
     wasIdQuery = false;
   }
 
-  let allJackettResults = [];
-  // Iterate through search queries until enough results are found or all queries exhausted
-  for (const queryParams of jackettSearchQueries) {
-    try {
-      const jackettResponse = await fetchJackettResults(queryParams, DEFAULT_CONFIG);
-      if (jackettResponse && jackettResponse.Results) {
-        allJackettResults = allJackettResults.concat(jackettResponse.Results);
-        // Stop querying if we have enough results based on maxResults config
-        if (allJackettResults.length >= DEFAULT_CONFIG.maxResults) {
-            log.debug(`Reached maxResults (${DEFAULT_CONFIG.maxResults}) after query: ${JSON.stringify(queryParams)}`);
-            break; 
-        }
+  // Deduplicate all results again after merging from multiple queries
+  const finalSeenGuids = new Set();
+  allJackettResults = allJackettResults.filter(item => {
+      if (finalSeenGuids.has(item.MagnetUri)) { 
+          return false;
       }
-    } catch (error) {
-      log.warn(`Failed to fetch Jackett results for query ${JSON.stringify(queryParams)}: ${error.message}`);
-    }
-  }
+      finalSeenGuids.add(item.MagnetUri);
+      return true;
+  });
+
 
   let streams = [];
   if (allJackettResults.length > 0) {
     // Filter results for quality and preferences
     const validatedResults = allJackettResults.filter(item => 
-      validateJackettResult(item, metadata, wasIdQuery)
+      validateJackettResult(item, metadata, wasIdQuery, config)
     );
 
-    // Calculate match score for each validated item
-    const resultsWithScore = validatedResults.map(item => ({
+    // Filter by minimum seeders from config
+    const filteredBySeeders = validatedResults.filter(item => item.Seeders >= config.filterBySeeders);
+    log.info(`Filtered down to ${filteredBySeeders.length} results after min seeders (${config.filterBySeeders})`);
+
+    const resultsWithScore = filteredBySeeders.map(item => ({
         item,
-        score: calculateMatchScore(item, metadata), // Calculate score here
+        score: calculateMatchScore(item, metadata), 
         resolution: extractResolution(item.Title) || 'Unknown',
         language: extractLanguage(item.Title) || 'Unknown',
         originalSeeders: item.Seeders || 0,
         originalSize: item.Size || 0,
+        publishDate: new Date(item.PublishDate || 0)
     }));
 
-    // Sort by:
-    // 1. Match Score (highest first)
-    // 2. PublishDate (latest first)
-    // 3. Preferred Resolution (higher preference first)
-    // 4. Seeders (more seeders first)
+    // Sort based on user's sortBy preference
     const sortedAndScoredResults = resultsWithScore.sort((a, b) => {
-      // 1. Sort by Match Score
-      if (b.score !== a.score) {
-          return b.score - a.score;
-      }
-      // 2. Then by PublishDate (latest first)
-      const dateA = new Date(a.item.PublishDate || 0);
-      const dateB = new Date(b.item.PublishDate || 0);
-      if (dateB.getTime() !== dateA.getTime()) {
-        return dateB.getTime() - dateA.getTime();
-      }
-      // 3. Then by preferred resolution (higher preference first)
-      const resOrder = DEFAULT_CONFIG.preferredResolutions.concat(['Unknown']).reverse();
-      const aResIndex = resOrder.indexOf(a.resolution);
-      const bResIndex = resOrder.indexOf(b.resolution);
-      if (aResIndex !== bResIndex) {
-        return aResIndex - bResIndex;
-      }
-      // 4. Finally by seeders (more seeders first)
-      return b.originalSeeders - a.originalSeeders;
+        if (config.sortBy === 'score') {
+            if (b.score !== a.score) return b.score - a.score;
+        }
+        if (config.sortBy === 'seeders') {
+            if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
+        }
+        if (config.sortBy === 'publishAt') {
+            if (b.publishDate.getTime() !== a.publishDate.getTime()) return b.publishDate.getTime() - a.publishDate.getTime();
+        }
+        // Fallback for ties or if sortBy isn't one of the main options
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.originalSeeders !== a.originalSeeders) return b.originalSeeders - a.originalSeeders;
+        return b.publishDate.getTime() - a.publishDate.getTime();
     })
-    .slice(0, DEFAULT_CONFIG.maxResults); // Apply maxResults after full sorting and filtering
+    .slice(0, config.maxResults); // Apply user's maxResults after full sorting and filtering
+
+    // Fetch trackers once for all streams
+    const currentTrackers = await fetchAndCachePublicTrackers(config.publicTrackersUrl);
 
     for (const link of sortedAndScoredResults) {
-        // Use the createStremioStream utility to format the stream object
-        const stremioStream = createStremioStream(link.item, type, link.item.MagnetUri);
+        const stremioStream = createStremioStream(link.item, type, link.item.MagnetUri, currentTrackers);
         if (stremioStream) {
             streams.push(stremioStream);
         }
     }
   }
 
+  log.info(`[STREMIO RESPONSE] Sending ${streams.length} streams to Stremio for ID: ${id}`);
+  log.debug(`[STREMIO RESPONSE] Full streams array for ID ${id}:`, JSON.stringify(streams, null, 2));
   res.json({ streams: streams });
+});
+
+// Basic health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
 });
 
 // Start the server
 app.listen(PORT, () => {
   log.info(`Stremio Jackett Addon (Node.js) listening on port ${PORT}`);
   log.info(`Manifest URL: http://localhost:${PORT}/manifest.json`);
-  log.info(`Jackett URL: ${DEFAULT_CONFIG.jackettUrl}`);
-  log.info(`Jackett API Key: ${DEFAULT_CONFIG.jackettApiKey.substring(0, 5)}...`);
-  log.info(`OMDB API Key: ${DEFAULT_CONFIG.omdbApiKey === 'YOUR_OMDB_API_KEY' ? 'YOUR_OMDB_API_KEY' : DEFAULT_CONFIG.omdbApiKey.substring(0, 5) + '...'}`);
-  log.info(`TMDB API Key: ${DEFAULT_CONFIG.tmdbApiKey === 'YOUR_TMDB_API_KEY' ? 'YOUR_TMDB_API_KEY' : DEFAULT_CONFIG.tmdbApiKey.substring(0, 5) + '...'}`);
-  log.info(`Public Trackers URL: ${DEFAULT_CONFIG.publicTrackersUrl}`);
-  log.info(`Logging Level: ${DEFAULT_CONFIG.logLevel}`);
+  log.info(`Jackett URL: ${CURRENT_CONFIG.jackettUrl}`);
+  log.info(`Jackett API Key: ${CURRENT_CONFIG.jackettApiKey.substring(0, Math.min(CURRENT_CONFIG.jackettApiKey.length, 5))}...`);
+  log.info(`OMDB API Key: ${CURRENT_CONFIG.omdbApiKey === 'YOUR_OMDB_API_KEY' ? 'YOUR_OMDB_API_KEY' : CURRENT_CONFIG.omdbApiKey.substring(0, Math.min(CURRENT_CONFIG.omdbApiKey.length, 5)) + '...'}`);
+  log.info(`TMDB API Key: ${CURRENT_CONFIG.tmdbApiKey === 'YOUR_TMDB_API_KEY' ? 'YOUR_TMDB_API_KEY' : CURRENT_CONFIG.tmdbApiKey.substring(0, Math.min(CURRENT_CONFIG.tmdbApiKey.length, 5)) + '...'}`);
+  log.info(`Public Trackers URL: ${CURRENT_CONFIG.publicTrackersUrl}`);
+  log.info(`Logging Level: ${CURRENT_CONFIG.logLevel}`);
 });
 
